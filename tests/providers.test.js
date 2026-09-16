@@ -1,7 +1,7 @@
 /**
  * tests/providers.test.js
  * 供应商层单测：全部用桩 fetchImpl，不打真实网络。
- * 覆盖搜索映射、抓取 retryable 标记、单条扇出、缺键抛码、回退链、余额端点鉴权。
+ * 覆盖搜索映射、抓取 retryable 标记、单条扇出、缺键抛码、回退链、余额端点鉴权、动态钱包单双空三态。
  */
 
 import { describe, it } from 'node:test';
@@ -283,5 +283,67 @@ describe('handleCredits 余额端点鉴权', () => {
     const body = await response.json();
     assert.equal(body.success, false);
     assert.equal(body.error, 'missing_api_key');
+  });
+});
+
+/** 动态钱包：余额 data 按接入名单动态组装，有几家回几家，空名单回 500 代理未配置。 */
+describe('handleCredits 动态钱包', () => {
+  it('单 linkup 只回 linkup 键', async () => {
+    /** @type {(url: string) => Promise<any>} 只服务 Linkup 余额地址的桩 */
+    const linkupOnlyStub = async (url) => {
+      assert.match(String(url), /credits\/balance/);
+      return stubResponse({ balance: 1234 });
+    };
+    const request = new Request('https://case.local/credits', {
+      headers: { authorization: 'Bearer ' + PROXY_KEY },
+    });
+    const response = await handleCredits(
+      request,
+      { env: { PROXY_API_KEY: PROXY_KEY, LINKUP_API_KEY: 'test-linkup-key' }, fetchImpl: linkupOnlyStub },
+    );
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.success, true);
+    assert.equal(body?.data?.linkup?.provider, 'linkup');
+    assert.equal(body?.data?.linkup?.balance, 1234);
+    assert.equal('tinyfish' in (body?.data ?? {}), false);
+  });
+
+  it('单 tinyfish 只回 tinyfish 键', async () => {
+    /** @type {(url: string) => Promise<any>} 只服务 Tinyfish 钱包地址的桩 */
+    const tinyfishOnlyStub = async (url) => {
+      assert.match(String(url), /agent\.tinyfish\.ai\/v1\/wallet/);
+      return stubResponse({ wallet: { credits: 5678 } });
+    };
+    const request = new Request('https://case.local/credits', {
+      headers: { authorization: 'Bearer ' + PROXY_KEY },
+    });
+    const response = await handleCredits(
+      request,
+      { env: { PROXY_API_KEY: PROXY_KEY, TINYFISH_API_KEY: 'test-tinyfish-key' }, fetchImpl: tinyfishOnlyStub },
+    );
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.success, true);
+    assert.equal(body?.data?.tinyfish?.provider, 'tinyfish');
+    assert.equal('linkup' in (body?.data ?? {}), false);
+  });
+
+  it('空名单回 500 代理未配置', async () => {
+    /** @type {(url: string) => Promise<any>} 不应被调用的上游桩 */
+    const neverStub = async () => {
+      throw new Error('空名单时不应触碰上游');
+    };
+    const request = new Request('https://case.local/credits', {
+      headers: { authorization: 'Bearer ' + PROXY_KEY },
+    });
+    const response = await handleCredits(
+      request,
+      { env: { PROXY_API_KEY: PROXY_KEY }, fetchImpl: neverStub },
+    );
+    assert.equal(response.status, 500);
+    const body = await response.json();
+    assert.equal(body.success, false);
+    assert.equal(body.error, 'proxy_misconfigured');
   });
 });

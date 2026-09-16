@@ -2,7 +2,8 @@
  * scripts/smoke.js
  * 本地冒烟：零依赖、不联网，全部用桩 fetchImpl 代替上游。
  * 覆盖 initialize 回服务名 / tools.list 回三工具名 / so_search 映射正确 /
- * so_fetch 回退链正确 / handleCredits 双 OK 与缺上游键回代理未配置。
+ * so_fetch 回退链正确 / handleCredits 动态键双家 OK 且无汇总字段 /
+ * 空名单回代理未配置 / 单家只回单键。
  * 任一步失败即非零退出；全部通过打印中文通过行。
  */
 
@@ -147,7 +148,7 @@ async function main() {
   check((fetchPayload.errors || []).length === 0, 'so_fetch 回退后 errors 应为空');
   console.log('通过：tools/call so_fetch 回退链正确');
 
-  // 5. handleCredits 双 OK：两家余额并行查到（持有者令牌鉴权）。
+  // 5. handleCredits 动态键双家：两家余额并行查到，无汇总字段（持有者令牌鉴权）。
   const okRequest = new Request('https://smoke.local/credits', {
     headers: { Authorization: 'Bearer ' + PROXY_KEY },
   });
@@ -163,31 +164,49 @@ async function main() {
     },
   );
   const okBody = await okResponse.json();
-  check(okResponse.status === 200, 'handleCredits 双 OK 未回 200');
+  check(okResponse.status === 200, 'handleCredits 双家动态键未回 200');
   check(
     okBody?.data?.linkup?.provider === 'linkup' &&
       typeof okBody.data.linkup.balance === 'number',
     'handleCredits linkup 余额缺失',
   );
   check(okBody?.data?.tinyfish?.provider === 'tinyfish', 'handleCredits tinyfish 钱包缺失');
-  console.log('通过：handleCredits 双 Key 下两家余额均 OK');
+  check(Object.keys(okBody?.data ?? {}).length === 2, 'handleCredits 双家 data 应恰含两键');
+  check(!('total' in (okBody?.data ?? {})), 'handleCredits 不应回汇总 total 字段');
+  check(!('balance' in (okBody?.data ?? {})), 'handleCredits 不应回汇总 balance 字段');
+  console.log('通过：handleCredits 双家动态键均 OK 且无汇总字段');
 
-  // 6. handleCredits 缺上游键：部署未配置回 500 代理未配置。
-  const skipRequest = new Request('https://smoke.local/credits', {
+  // 6. handleCredits 空名单：两上游密钥均缺配才回 500 代理未配置。
+  const emptyRequest = new Request('https://smoke.local/credits', {
     headers: { Authorization: 'Bearer ' + PROXY_KEY },
   });
-  const skipResponse = await handleCredits(
-    skipRequest,
+  const emptyResponse = await handleCredits(
+    emptyRequest,
     { env: { PROXY_API_KEY: PROXY_KEY }, fetchImpl: stubFetch },
   );
-  const skipBody = await skipResponse.json();
-  check(skipResponse.status === 500, 'handleCredits 缺上游键时未回 500');
-  check(skipBody?.error === 'proxy_misconfigured', 'handleCredits 缺上游键时未报代理未配置');
-  console.log('通过：handleCredits 缺上游键时回 500 代理未配置');
+  const emptyBody = await emptyResponse.json();
+  check(emptyResponse.status === 500, 'handleCredits 空名单时未回 500');
+  check(emptyBody?.error === 'proxy_misconfigured', 'handleCredits 空名单时未报代理未配置');
+  console.log('通过：handleCredits 空名单时回 500 代理未配置');
 
+  // 7. handleCredits 单家：仅 LINKUP_API_KEY 时只回 linkup 单键。
+  const singleRequest = new Request('https://smoke.local/credits', {
+    headers: { Authorization: 'Bearer ' + PROXY_KEY },
+  });
+  const singleResponse = await handleCredits(
+    singleRequest,
+    {
+      env: { PROXY_API_KEY: PROXY_KEY, LINKUP_API_KEY: 'smoke-linkup-key' },
+      fetchImpl: stubFetch,
+    },
+  );
+  const singleBody = await singleResponse.json();
+  check(singleResponse.status === 200, 'handleCredits 单家时未回 200');
+  check(singleBody?.data?.linkup?.provider === 'linkup', 'handleCredits 单家 linkup 键缺失');
+  check(!('tinyfish' in (singleBody?.data ?? {})), 'handleCredits 单家时不应补 tinyfish 空键');
+  console.log('通过：handleCredits 单家只回 linkup 单键');
   console.log('冒烟全部通过');
 }
-
 main().catch((error) => {
   console.error('冒烟失败：' + (error instanceof Error ? error.message : String(error)));
   process.exit(1);

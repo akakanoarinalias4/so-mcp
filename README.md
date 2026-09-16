@@ -76,17 +76,18 @@ curl -s 'https://<应用>.vercel.app/mcp' \
 - 验证：抓取整体失败不阻断验证，仅记入 `notes`，`fetched` 为空则 `consistent` 为 false。
 
 ## 余额独立查看声明
-
 余额不参与工作流，仅供人工查额度。协议工具列表无余额项，模型工作流四步中永不调用余额。
 需人工确认剩余额度时，直接查独立端点：
 
 ```bash
 curl -s 'https://<应用>.vercel.app/credits' -H "Authorization: Bearer $PROXY_API_KEY"
-# {"success":true,"data":{"linkup":{...},"tinyfish":{...}},"checkedAt":"..."}
+# 双家示例：{"success":true,"data":{"linkup":{...},"tinyfish":{...}},"checkedAt":"..."}
+# 单家只回单键：仅配 LINKUP_API_KEY 时 data 只有 linkup 一键，不补空键。
 ```
 
-两家并行查询，一家失败不阻塞另一家；但 `LINKUP_API_KEY` 与 `TINYFISH_API_KEY` 均为必填，
-任一缺配整体直接停机回 500 代理未配置，不再记跳过。
+`data` 为按接入名单动态组装的键对象，有几家回几家，不做跨供应商汇总，不写死键集合。
+按名单并行查询，一家失败不阻塞另一家；名单由上游密钥存在性决定，
+名单为空（两上游密钥均缺配）才整体停机回 500 代理未配置，单键可运行。
 该端点同样走统一准入鉴权：无代理密钥回 `missing_api_key`，错密钥回 `invalid_api_key`。
 
 ## 环境变量
@@ -94,8 +95,8 @@ curl -s 'https://<应用>.vercel.app/credits' -H "Authorization: Bearer $PROXY_A
 | 变量 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `PROXY_API_KEY` | 是 | — | 客户端出示给本代理的凭证（唯一需要配给客户端的密钥）。 |
-| `LINKUP_API_KEY` | 是 | — | Linkup 上游密钥（搜索 / 回退抓取 / 余额）。缺配即 500 代理未配置，不再跳过。 |
-| `TINYFISH_API_KEY` | 是 | — | Tinyfish 上游密钥（主抓取 / 钱包）。缺配即 500 代理未配置，不再跳过。 |
+| `LINKUP_API_KEY` | 按名单 | — | Linkup 上游密钥（搜索 / 回退抓取 / 余额）。有一上游键即可运行，名单为空才 500 代理未配置。 |
+| `TINYFISH_API_KEY` | 按名单 | — | Tinyfish 上游密钥（主抓取 / 钱包）。有一上游键即可运行，名单为空才 500 代理未配置。 |
 | `SEARCH_PROVIDER` | 否 | `linkup` | 搜索供应商名。 |
 | `FETCH_PRIMARY` | 否 | `tinyfish` | 抓取主供应商名。 |
 | `FETCH_FALLBACK` | 否 | `linkup` | 抓取回退供应商名（与主同名时不回退）。 |
@@ -104,7 +105,7 @@ curl -s 'https://<应用>.vercel.app/credits' -H "Authorization: Bearer $PROXY_A
 ## 部署与本地验证
 
 1. 把本仓库导入 Vercel（Import Git，框架选 Other）。
-2. 在项目 Settings → Environment Variables 设置上表变量（`PROXY_API_KEY`、`LINKUP_API_KEY`、`TINYFISH_API_KEY` 三密钥均须设置，缺一不可）。
+2. 在项目 Settings → Environment Variables 设置上表变量（`PROXY_API_KEY` 必填，上游两键至少配其一，名单为空才停机）。
 3. 点 Deploy，得到 `https://<应用>.vercel.app`。
 4. 验证 MCP 握手：
    ```bash
@@ -165,7 +166,7 @@ cat ~/.omp/agent/mcp.json
 # 2. 改完重载客户端使其读新配置，然后发一句让模型列工具自检
 # 例如新开一轮对话让模型调 so_verify 做一次小查询：
 # “用 so-mcp 的 so_verify 查一下 mcp search api（maxResults 传 2），只看链路通不通”
-# 3. 若模型报 401，先对照排错表查鉴权头，再确认服务端三密钥与重部署
+# 3. 若模型报 401，先对照排错表查鉴权头，再确认服务端代理密钥与上游名单后重部署
 ```
 
 
@@ -176,7 +177,7 @@ cat ~/.omp/agent/mcp.json
 ### 1. 前置条件
 
 - 已部署得到域名 `https://<应用>.vercel.app`。
-- 服务端已设置三密钥，缺一不可：`PROXY_API_KEY`、`LINKUP_API_KEY`、`TINYFISH_API_KEY`。
+- 服务端已设 `PROXY_API_KEY` 且上游至少配其一（`LINKUP_API_KEY` / `TINYFISH_API_KEY` 按名单接入，名单为空才停机）。
 - 本地拿到可用的代理密钥明文 `$PROXY_API_KEY`。
 
 ### 2. 获取接入三要素
@@ -240,13 +241,11 @@ curl -s 'https://<应用>.vercel.app/credits' -H "Authorization: Bearer $PROXY_A
 
 仅供人工确认剩余额度，不参与模型工作流。
 
-### 7. 排错对照表
-
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
 | `401 missing_api_key` | 未带 `Authorization: Bearer` 头，或用了已废止的旧头与查询参数 | 改为 `Authorization: Bearer $PROXY_API_KEY` 重试 |
 | `401 invalid_api_key` | 令牌值与服务端 `PROXY_API_KEY` 不一致 | 核对客户端密钥与 Vercel 服务端变量是否一致 |
-| `500 代理未配置` | `LINKUP_API_KEY` 或 `TINYFISH_API_KEY` 缺配 | 补齐服务端两上游密钥后重新部署 |
+| `500 代理未配置` | `LINKUP_API_KEY` 与 `TINYFISH_API_KEY` 均缺配（空名单） | 至少补一上游密钥后重新部署，单键可运行 |
 | `429 限流` | 上游限流或配额不足 | 降低并发、减小 `maxResults`，稍后重试，必要时查余额确认额度 |
 | `504 超时` | 大批量抓取超出函数执行时长 | 按超时拆分：每次 `so_fetch` 传 ≤10 条，多次分批抓取；余额侧检查 `CREDITS_TIMEOUT_MS` |
 
