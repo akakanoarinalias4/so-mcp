@@ -1,22 +1,20 @@
 /**
  * tests/providers.test.js
  * 供应商层单测：全部用桩 fetchImpl，不打真实网络。
- * 覆盖搜索映射、抓取 retryable 标记、单条扇出、缺键抛码、回退链、分级上限、搜索扇出、
- * 余额端点鉴权、动态钱包单双空三态。
+ * 覆盖搜索映射、抓取 retryable 标记、批量结算、缺键抛码、回退链、分级上限、搜索扇出、
+ * 余额端点鉴权、动态钱包单空二态。
  */
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { linkupSearch } from '../lib/providers/search-linkup.js';
+import { tavilySearch } from '../lib/providers/search-tavily.js';
 import { tinyfishFetch } from '../lib/providers/fetch-tinyfish.js';
-import { linkupFetch } from '../lib/providers/fetch-linkup.js';
-import { getLinkupBalance, getTinyfishWallet } from '../lib/credits.js';
+import { tavilyFetch } from '../lib/providers/fetch-tavily.js';
+import { getTinyfishWallet } from '../lib/credits.js';
 import { dispatchTool } from '../lib/tools.js';
 import { handleCredits } from '../lib/endpoints/credits.js';
 
-/** Linkup 搜索地址片段（桩路由用）。 */
-const SEARCH_MARK = '/v1/search';
-/** Tinyfish 抓取地址（与实现默认值对齐）。 */
+/** Tinyfish 抓取地址（与实现默认值对齐，回退桩路由用）。 */
 const TINYFISH_FETCH_URL = 'https://api.fetch.tinyfish.ai';
 /** Tinyfish 钱包地址（与实现默认值对齐，钱包与智能体同宿主，与抓取宿主分离）。 */
 const TINYFISH_WALLET_URL = 'https://agent.tinyfish.ai/v1/wallet';
@@ -43,23 +41,23 @@ function stubResponse(data, status = 200) {
  * @returns {Promise<{ok: boolean, status: number, json: () => Promise<unknown>}>} 桩响应
  */
 async function searchStub(url) {
-  assert.match(String(url), /\/v1\/search/);
+  assert.match(String(url), /api\.tavily\.com\/search/);
   return stubResponse({
     results: [
-      { name: '标题甲', url: 'https://case.local/1', content: '正文甲' },
+      { title: '标题甲', url: 'https://case.local/1', content: '正文甲' },
       { title: '标题乙', link: 'https://case.local/2', snippet: '正文乙' },
     ],
   });
 }
 
-/** 搜索映射：name/url/content 与 title/link/snippet 都归一为 title/url/content。 */
-describe('linkupSearch 映射', () => {
+/** 搜索映射：url/content 与 link/snippet 都归一为 title/url/content。 */
+describe('tavilySearch 映射', () => {
   it('两种字段形态都归一', async () => {
-    const out = await linkupSearch({ query: '单测' }, {
-      linkupApiKey: 'test-key',
+    const out = await tavilySearch({ query: '单测' }, {
+      tavilyApiKey: 'test-key',
       fetchImpl: searchStub,
     });
-    assert.equal(out.provider, 'linkup');
+    assert.equal(out.provider, 'tavily');
     assert.equal(out.results.length, 2);
     assert.deepEqual(
       { title: out.results[0].title, url: out.results[0].url, content: out.results[0].content },
@@ -93,20 +91,19 @@ describe('tinyfishFetch 错误标记', () => {
   });
 });
 
-/** 单条扇出：成功地址进 results，404 地址进 errors 且不可重试。 */
-describe('linkupFetch 单条扇出', () => {
+/** 批量结算：成功地址进 results，失败地址进 errors 且不可重试。 */
+describe('tavilyFetch 批量结算', () => {
   it('逐地址结算互不干扰', async () => {
-    /** @type {(url: string, init?: any) => Promise<any>} 按目标地址分流的桩 */
-    const fanoutStub = async (url, init = {}) => {
-      assert.ok(String(url).includes(SEARCH_MARK) === false);
-      const target = JSON.parse(init.body || '{}').url;
-      if (target === GOOD_URL) {
-        return stubResponse({ url: target, title: '好标题', markdown: '好正文' });
-      }
-      return stubResponse({ message: 'not found' }, 404);
+    /** @type {(url: string, init?: any) => Promise<any>} 固定批量回包的桩 */
+    const fanoutStub = async (url) => {
+      assert.match(String(url), /api\.tavily\.com\/extract/);
+      return stubResponse({
+        results: [{ url: GOOD_URL, title: '好标题', raw_content: '好正文' }],
+        failed_results: [{ url: BAD_URL, error: 'extract_failed' }],
+      });
     };
-    const out = await linkupFetch({ urls: [GOOD_URL, BAD_URL] }, {
-      linkupApiKey: 'test-key',
+    const out = await tavilyFetch({ urls: [GOOD_URL, BAD_URL] }, {
+      tavilyApiKey: 'test-key',
       fetchImpl: fanoutStub,
     });
     assert.equal(out.results.length, 1);
@@ -119,14 +116,14 @@ describe('linkupFetch 单条扇出', () => {
 });
 
 /** 缺 Key：直接抛 CREDENTIAL_MISSING，不触碰网络。 */
-describe('getLinkupBalance 缺 Key', () => {
+describe('tavilySearch 缺 Key', () => {
   it('抛 CREDENTIAL_MISSING', async () => {
     /** @type {(url: string) => Promise<any>} 不应被调用的桩 */
     const neverStub = async () => {
       throw new Error('缺 Key 时不应发起请求');
     };
     await assert.rejects(
-      getLinkupBalance({ fetchImpl: neverStub }),
+      tavilySearch({ query: '单测' }, { fetchImpl: neverStub }),
       (/** @type {any} */ error) => (/** @type {any} */ (error)).code === 'CREDENTIAL_MISSING',
     );
   });
@@ -198,18 +195,22 @@ describe('dispatchTool 回退链', () => {
           errors: asked.map((/** @type {any} */ item) => ({ url: item, error: 'timeout' })),
         });
       }
-      const target = JSON.parse(init.body || '{}').url;
-      return stubResponse({ url: target, title: '回退标题', markdown: '回退正文' });
+      assert.match(text, /api\.tavily\.com\/extract/);
+      const asked = JSON.parse(init.body || '{}').urls || [];
+      return stubResponse({
+        results: asked.map((/** @type {any} */ target) => ({ url: target, title: '回退标题', raw_content: '回退正文' })),
+        failed_results: [],
+      });
     };
     const out = await dispatchTool('so_fetch', { urls: [GOOD_URL] }, /** @type {any} */ ({
       fetchPrimary: 'tinyfish',
-      fetchFallback: 'linkup',
+      fetchFallback: 'tavily',
       tinyfishApiKey: 'test-key',
-      linkupApiKey: 'test-key',
+      tavilyApiKey: 'test-key',
       fetchImpl: fallbackStub,
     }));
     assert.equal(out.fallbackUsed, true);
-    assert.deepEqual(out.providers, ['tinyfish', 'linkup']);
+    assert.deepEqual(out.providers, ['tinyfish', 'tavily']);
     assert.equal(out.results.length, 1);
     assert.equal(out.results[0].url, GOOD_URL);
     assert.equal(out.errors.length, 0);
@@ -283,7 +284,7 @@ describe('handleCredits 余额端点鉴权', () => {
     const request = new Request('https://case.local/credits');
     const response = await handleCredits(
       request,
-      { env: { PROXY_API_KEY: PROXY_KEY, LINKUP_API_KEY: 'test-linkup-key', TINYFISH_API_KEY: 'test-tinyfish-key' }, fetchImpl: neverStub },
+      { env: { PROXY_API_KEY: PROXY_KEY, TAVILY_API_KEY: 'test-tavily-key', TINYFISH_API_KEY: 'test-tinyfish-key' }, fetchImpl: neverStub },
     );
     assert.equal(response.status, 401);
     const body = await response.json();
@@ -301,7 +302,7 @@ describe('handleCredits 余额端点鉴权', () => {
     });
     const response = await handleCredits(
       request,
-      { env: { PROXY_API_KEY: PROXY_KEY, LINKUP_API_KEY: 'test-linkup-key', TINYFISH_API_KEY: 'test-tinyfish-key' }, fetchImpl: neverStub },
+      { env: { PROXY_API_KEY: PROXY_KEY, TAVILY_API_KEY: 'test-tavily-key', TINYFISH_API_KEY: 'test-tinyfish-key' }, fetchImpl: neverStub },
     );
     assert.equal(response.status, 401);
     const body = await response.json();
@@ -319,7 +320,7 @@ describe('handleCredits 余额端点鉴权', () => {
     });
     const response = await handleCredits(
       request,
-      { env: { PROXY_API_KEY: PROXY_KEY, LINKUP_API_KEY: 'test-linkup-key', TINYFISH_API_KEY: 'test-tinyfish-key' }, fetchImpl: neverStub },
+      { env: { PROXY_API_KEY: PROXY_KEY, TAVILY_API_KEY: 'test-tavily-key', TINYFISH_API_KEY: 'test-tinyfish-key' }, fetchImpl: neverStub },
     );
     assert.equal(response.status, 401);
     const body = await response.json();
@@ -335,7 +336,7 @@ describe('handleCredits 余额端点鉴权', () => {
     const request = new Request(`https://case.local/credits?apiKey=${PROXY_KEY}`);
     const response = await handleCredits(
       request,
-      { env: { PROXY_API_KEY: PROXY_KEY, LINKUP_API_KEY: 'test-linkup-key', TINYFISH_API_KEY: 'test-tinyfish-key' }, fetchImpl: neverStub },
+      { env: { PROXY_API_KEY: PROXY_KEY, TAVILY_API_KEY: 'test-tavily-key', TINYFISH_API_KEY: 'test-tinyfish-key' }, fetchImpl: neverStub },
     );
     assert.equal(response.status, 401);
     const body = await response.json();
@@ -346,27 +347,6 @@ describe('handleCredits 余额端点鉴权', () => {
 
 /** 动态钱包：余额 data 按接入名单动态组装，有几家回几家，空名单回 500 代理未配置。 */
 describe('handleCredits 动态钱包', () => {
-  it('单 linkup 只回 linkup 键', async () => {
-    /** @type {(url: string) => Promise<any>} 只服务 Linkup 余额地址的桩 */
-    const linkupOnlyStub = async (url) => {
-      assert.match(String(url), /credits\/balance/);
-      return stubResponse({ balance: 1234 });
-    };
-    const request = new Request('https://case.local/credits', {
-      headers: { authorization: 'Bearer ' + PROXY_KEY },
-    });
-    const response = await handleCredits(
-      request,
-      { env: { PROXY_API_KEY: PROXY_KEY, LINKUP_API_KEY: 'test-linkup-key' }, fetchImpl: linkupOnlyStub },
-    );
-    assert.equal(response.status, 200);
-    const body = await response.json();
-    assert.equal(body.success, true);
-    assert.equal(body?.data?.linkup?.provider, 'linkup');
-    assert.equal(body?.data?.linkup?.balance, 1234);
-    assert.equal('tinyfish' in (body?.data ?? {}), false);
-  });
-
   it('单 tinyfish 只回 tinyfish 键', async () => {
     /** @type {(url: string) => Promise<any>} 只服务 Tinyfish 钱包地址的桩 */
     const tinyfishOnlyStub = async (url) => {
@@ -384,8 +364,9 @@ describe('handleCredits 动态钱包', () => {
     const body = await response.json();
     assert.equal(body.success, true);
     assert.equal(body?.data?.tinyfish?.provider, 'tinyfish');
-    assert.equal('linkup' in (body?.data ?? {}), false);
+    assert.equal('tavily' in (body?.data ?? {}), false);
   });
+
 
   it('空名单回 500 代理未配置', async () => {
     /** @type {(url: string) => Promise<any>} 不应被调用的上游桩 */

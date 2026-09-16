@@ -14,9 +14,9 @@ import { handleCredits } from '../lib/endpoints/credits.js';
 /** 冒烟用的代理凭证（只活在本地进程）。 */
 const PROXY_KEY = 'smoke-proxy-key';
 
-/** 桩搜索结果：覆盖 name/url/content 与 title/link/snippet 两种上游字段形态。 */
+/** 桩搜索结果：覆盖 url/content 与 link/snippet 两种上游字段形态。 */
 const STUB_SEARCH_RESULTS = [
-  { name: '冒烟标题一', url: 'https://smoke.local/a', content: '冒烟正文一' },
+  { title: '冒烟标题一', url: 'https://smoke.local/a', content: '冒烟正文一' },
   { title: '冒烟标题二', link: 'https://smoke.local/b', snippet: '冒烟正文二' },
 ];
 
@@ -43,15 +43,8 @@ function stubResponse(data, status = 200) {
  */
 async function stubFetch(url, init = {}) {
   const text = String(url);
-  if (text.includes('credits/balance')) {
-    return stubResponse({ balance: 1234 });
-  }
   if (text === TINYFISH_WALLET_URL || text.includes('agent.tinyfish.ai/v1/wallet')) {
     return stubResponse({ wallet: { credits: 5678 } });
-  }
-  if (text.includes('/v1/fetch')) {
-    const body = JSON.parse(init.body || '{}');
-    return stubResponse({ url: body.url, title: '冒烟抓取', markdown: '冒烟抓取正文' });
   }
   if (text.includes('api.search.tinyfish.ai')) {
     return stubResponse({
@@ -60,8 +53,16 @@ async function stubFetch(url, init = {}) {
       ],
     });
   }
-  if (text.includes('/v1/search')) {
+  if (text.includes('api.tavily.com/search')) {
     return stubResponse({ results: STUB_SEARCH_RESULTS });
+  }
+  if (text.includes('api.tavily.com/extract')) {
+    const body = JSON.parse(init.body || '{}');
+    const urls = Array.isArray(body.urls) ? body.urls : [];
+    return stubResponse({
+      results: urls.map((target) => ({ url: target, title: '冒烟抓取', raw_content: '冒烟抓取正文' })),
+      failed_results: [],
+    });
   }
   if (text.includes('tinyfish')) {
     const body = JSON.parse(init.body || '{}');
@@ -119,10 +120,10 @@ async function main() {
       method: 'tools/call',
       params: { name: 'so_search', arguments: { query: '冒烟关键词' } },
     },
-    { searchProvider: 'linkup', linkupApiKey: 'smoke-linkup-key', fetchImpl: stubFetch },
+    { searchProvider: 'tavily', tavilyApiKey: 'smoke-tavily-key', fetchImpl: stubFetch },
   );
   const payload = JSON.parse(callRes?.result?.content?.[0]?.text || '{}');
-  check(payload.provider === 'linkup', 'so_search 未返回 linkup 供应商标记');
+  check(payload.provider === 'tavily', 'so_search 未返回 tavily 供应商标记');
   check(payload.results?.[0]?.title === '冒烟标题一', 'so_search 首条标题映射错误');
   check(payload.results?.[1]?.url === 'https://smoke.local/b', 'so_search 次条地址映射错误');
   check(payload.results?.[1]?.content === '冒烟正文二', 'so_search 次条正文映射错误');
@@ -138,9 +139,9 @@ async function main() {
     },
     {
       fetchPrimary: 'tinyfish',
-      fetchFallback: 'linkup',
+      fetchFallback: 'tavily',
       tinyfishApiKey: 'smoke-tinyfish-key',
-      linkupApiKey: 'smoke-linkup-key',
+      tavilyApiKey: 'smoke-tavily-key',
       fetchImpl: stubFetch,
     },
   );
@@ -149,25 +150,25 @@ async function main() {
   check(
     Array.isArray(fetchPayload.providers) &&
       fetchPayload.providers[0] === 'tinyfish' &&
-      fetchPayload.providers[1] === 'linkup',
-    'so_fetch 回退链 providers 应为 tinyfish,linkup',
+      fetchPayload.providers[1] === 'tavily',
+    'so_fetch 回退链 providers 应为 tinyfish,tavily',
   );
   check(fetchPayload.results?.[0]?.url === FALLBACK_URL, 'so_fetch 回退结果地址错误');
   check((fetchPayload.errors || []).length === 0, 'so_fetch 回退后 errors 应为空');
   console.log('通过：tools/call so_fetch 回退链正确');
 
   // 4b. tools/call so_search 扇出：双源并行按 URL 去重，保留首见 provider。
-  // 同名去重后只剩单源会走老语义，故用两个不同源触发扇出（桩按地址路由，同负载去重后 2 条）。
+  // 同名去重后只剩单源会走老语义，故用两个不同源触发扇出（桩按地址路由，同负载去重后 3 条）。
   const fanoutRes = await handleMcpRequest(
     {
       jsonrpc: '2.0',
       id: 41,
       method: 'tools/call',
-      params: { name: 'so_search', arguments: { query: '冒烟关键词', providers: ['tinyfish', 'linkup'] } },
+      params: { name: 'so_search', arguments: { query: '冒烟关键词', providers: ['tinyfish', 'tavily'] } },
     },
     {
       tinyfishApiKey: 'smoke-tinyfish-key',
-      linkupApiKey: 'smoke-linkup-key',
+      tavilyApiKey: 'smoke-tavily-key',
       fetchImpl: stubFetch,
     },
   );
@@ -176,17 +177,17 @@ async function main() {
   check(Array.isArray(fanoutPayload.results) && fanoutPayload.results.length === 3, 'so_search 扇出去重后应为 3 条');
   console.log('通过：tools/call so_search 扇出去重正确');
 
-  // 4c. tools/call so_verify：逐条引用与来源追溯装配正确（显式 tinyfish+linkup 双源共 3 源）。
+  // 4c. tools/call so_verify：逐条引用与来源追溯装配正确（显式 tinyfish+tavily 双源共 3 源）。
   const verifyRes = await handleMcpRequest(
     {
       jsonrpc: '2.0',
       id: 42,
       method: 'tools/call',
-      params: { name: 'so_verify', arguments: { query: '冒烟关键词', maxResults: 3, searchProviders: ['tinyfish', 'linkup'], fetchChain: ['linkup'] } },
+      params: { name: 'so_verify', arguments: { query: '冒烟关键词', maxResults: 3, searchProviders: ['tinyfish', 'tavily'], fetchChain: ['tavily'] } },
     },
     {
       tinyfishApiKey: 'smoke-tinyfish-key',
-      linkupApiKey: 'smoke-linkup-key',
+      tavilyApiKey: 'smoke-tavily-key',
       fetchImpl: stubFetch,
     },
   );
@@ -204,7 +205,7 @@ async function main() {
     {
       env: {
         PROXY_API_KEY: PROXY_KEY,
-        LINKUP_API_KEY: 'smoke-linkup-key',
+        TAVILY_API_KEY: 'smoke-tavily-key',
         TINYFISH_API_KEY: 'smoke-tinyfish-key',
       },
       fetchImpl: stubFetch,
@@ -212,12 +213,12 @@ async function main() {
   );
   const okBody = await okResponse.json();
   check(okResponse.status === 200, 'handleCredits 双家动态键未回 200');
-  check(
-    okBody?.data?.linkup?.provider === 'linkup' &&
-      typeof okBody.data.linkup.balance === 'number',
-    'handleCredits linkup 余额缺失',
-  );
   check(okBody?.data?.tinyfish?.provider === 'tinyfish', 'handleCredits tinyfish 钱包缺失');
+  check(
+    okBody?.data?.tavily?.provider === 'tavily' &&
+      okBody.data.tavily.balance === null,
+    'handleCredits tavily 余额缺失',
+  );
   check(Object.keys(okBody?.data ?? {}).length === 2, 'handleCredits 双家 data 应恰含两键');
   check(!('total' in (okBody?.data ?? {})), 'handleCredits 不应回汇总 total 字段');
   check(!('balance' in (okBody?.data ?? {})), 'handleCredits 不应回汇总 balance 字段');
@@ -236,22 +237,22 @@ async function main() {
   check(emptyBody?.error === 'proxy_misconfigured', 'handleCredits 空名单时未报代理未配置');
   console.log('通过：handleCredits 空名单时回 500 代理未配置');
 
-  // 7. handleCredits 单家：仅 LINKUP_API_KEY 时只回 linkup 单键。
+  // 7. handleCredits 单家：仅 TINYFISH_API_KEY 时只回 tinyfish 单键。
   const singleRequest = new Request('https://smoke.local/credits', {
     headers: { Authorization: 'Bearer ' + PROXY_KEY },
   });
   const singleResponse = await handleCredits(
     singleRequest,
     {
-      env: { PROXY_API_KEY: PROXY_KEY, LINKUP_API_KEY: 'smoke-linkup-key' },
+      env: { PROXY_API_KEY: PROXY_KEY, TINYFISH_API_KEY: 'smoke-tinyfish-key' },
       fetchImpl: stubFetch,
     },
   );
   const singleBody = await singleResponse.json();
   check(singleResponse.status === 200, 'handleCredits 单家时未回 200');
-  check(singleBody?.data?.linkup?.provider === 'linkup', 'handleCredits 单家 linkup 键缺失');
-  check(!('tinyfish' in (singleBody?.data ?? {})), 'handleCredits 单家时不应补 tinyfish 空键');
-  console.log('通过：handleCredits 单家只回 linkup 单键');
+  check(singleBody?.data?.tinyfish?.provider === 'tinyfish', 'handleCredits 单家 tinyfish 键缺失');
+  check(!('tavily' in (singleBody?.data ?? {})), 'handleCredits 单家时不应补 tavily 空键');
+  console.log('通过：handleCredits 单家只回 tinyfish 单键');
   console.log('冒烟全部通过');
 }
 main().catch((error) => {
