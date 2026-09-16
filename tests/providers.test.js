@@ -1,0 +1,158 @@
+/**
+ * tests/providers.test.js
+ * 供应商层单测：全部用桩 fetchImpl，不打真实网络。
+ * 覆盖搜索映射、抓取 retryable 标记、单条扇出、缺 Key 抛码、回退链。
+ */
+
+import { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+import { linkupSearch } from '../lib/providers/search-linkup.js';
+import { tinyfishFetch } from '../lib/providers/fetch-tinyfish.js';
+import { linkupFetch } from '../lib/providers/fetch-linkup.js';
+import { getLinkupBalance } from '../lib/credits.js';
+import { dispatchTool } from '../lib/tools.js';
+
+/** Linkup 搜索地址片段（桩路由用）。 */
+const SEARCH_MARK = '/v1/search';
+/** Tinyfish 抓取地址（与实现默认值对齐）。 */
+const TINYFISH_FETCH_URL = 'https://api.fetch.tinyfish.ai';
+/** 回退成功的目标地址。 */
+const GOOD_URL = 'https://case.local/good';
+/** 回退失败的目标地址。 */
+const BAD_URL = 'https://case.local/bad';
+
+/**
+ * 构造桩 Response（只实现调用方用到的 ok/status/json）。
+ * @param {unknown} data 响应 JSON 负载
+ * @param {number} [status] HTTP 状态码
+ * @returns {{ok: boolean, status: number, json: () => Promise<unknown>}} 桩响应
+ */
+function stubResponse(data, status = 200) {
+  return { ok: status >= 200 && status < 300, status, json: async () => data };
+}
+
+/**
+ * 搜索桩：返回两种字段形态的结果，断言映射用。
+ * @param {string} url 请求地址
+ * @returns {Promise<{ok: boolean, status: number, json: () => Promise<unknown>}>} 桩响应
+ */
+async function searchStub(url) {
+  assert.match(String(url), /\/v1\/search/);
+  return stubResponse({
+    results: [
+      { name: '标题甲', url: 'https://case.local/1', content: '正文甲' },
+      { title: '标题乙', link: 'https://case.local/2', snippet: '正文乙' },
+    ],
+  });
+}
+
+/** 搜索映射：name/url/content 与 title/link/snippet 都归一为 title/url/content。 */
+describe('linkupSearch 映射', () => {
+  it('两种字段形态都归一', async () => {
+    const out = await linkupSearch({ query: '单测' }, {
+      linkupApiKey: 'test-key',
+      fetchImpl: searchStub,
+    });
+    assert.equal(out.provider, 'linkup');
+    assert.equal(out.results.length, 2);
+    assert.deepEqual(
+      { title: out.results[0].title, url: out.results[0].url, content: out.results[0].content },
+      { title: '标题甲', url: 'https://case.local/1', content: '正文甲' },
+    );
+    assert.deepEqual(
+      { title: out.results[1].title, url: out.results[1].url, content: out.results[1].content },
+      { title: '标题乙', url: 'https://case.local/2', content: '正文乙' },
+    );
+  });
+});
+
+/** 抓取包内错误：timeout 可重试、page_not_found 不可重试。 */
+describe('tinyfishFetch 错误标记', () => {
+  it('retryable 按枚举标记', async () => {
+    /** @type {(url: string) => Promise<any>} 固定包内错误的桩 */
+    const mixedStub = async () => stubResponse({
+      results: [],
+      errors: [
+        { url: 'https://case.local/1', error: 'timeout' },
+        { url: 'https://case.local/2', error: 'page_not_found' },
+      ],
+    });
+    const out = await tinyfishFetch({ urls: ['https://case.local/1', 'https://case.local/2'] }, {
+      tinyfishApiKey: 'test-key',
+      fetchImpl: mixedStub,
+    });
+    assert.equal(out.errors.length, 2);
+    assert.equal(out.errors[0].retryable, true);
+    assert.equal(out.errors[1].retryable, false);
+  });
+});
+
+/** 单条扇出：成功地址进 results，404 地址进 errors 且不可重试。 */
+describe('linkupFetch 单条扇出', () => {
+  it('逐地址结算互不干扰', async () => {
+    /** @type {(url: string, init?: any) => Promise<any>} 按目标地址分流的桩 */
+    const fanoutStub = async (url, init = {}) => {
+      assert.ok(String(url).includes(SEARCH_MARK) === false);
+      const target = JSON.parse(init.body || '{}').url;
+      if (target === GOOD_URL) {
+        return stubResponse({ url: target, title: '好标题', markdown: '好正文' });
+      }
+      return stubResponse({ message: 'not found' }, 404);
+    };
+    const out = await linkupFetch({ urls: [GOOD_URL, BAD_URL] }, {
+      linkupApiKey: 'test-key',
+      fetchImpl: fanoutStub,
+    });
+    assert.equal(out.results.length, 1);
+    assert.equal(out.results[0].url, GOOD_URL);
+    assert.equal(out.results[0].content, '好正文');
+    assert.equal(out.errors.length, 1);
+    assert.equal(out.errors[0].url, BAD_URL);
+    assert.equal(out.errors[0].retryable, false);
+  });
+});
+
+/** 缺 Key：直接抛 CREDENTIAL_MISSING，不触碰网络。 */
+describe('getLinkupBalance 缺 Key', () => {
+  it('抛 CREDENTIAL_MISSING', async () => {
+    /** @type {(url: string) => Promise<any>} 不应被调用的桩 */
+    const neverStub = async () => {
+      throw new Error('缺 Key 时不应发起请求');
+    };
+    await assert.rejects(
+      getLinkupBalance({ fetchImpl: neverStub }),
+      (/** @type {any} */ error) => (/** @type {any} */ (error)).code === 'CREDENTIAL_MISSING',
+    );
+  });
+});
+
+/** 回退链：主供应商可重试失败后，回退补抓成功并置 fallbackUsed。 */
+describe('dispatchTool 回退链', () => {
+  it('主失败走回退且标记 fallbackUsed', async () => {
+    /** @type {(url: string, init?: any) => Promise<any>} 主次分流的桩 */
+    const fallbackStub = async (url, init = {}) => {
+      const text = String(url);
+      if (text === TINYFISH_FETCH_URL) {
+        const asked = JSON.parse(init.body || '{}').urls;
+        return stubResponse({
+          results: [],
+          errors: asked.map((/** @type {any} */ item) => ({ url: item, error: 'timeout' })),
+        });
+      }
+      const target = JSON.parse(init.body || '{}').url;
+      return stubResponse({ url: target, title: '回退标题', markdown: '回退正文' });
+    };
+    const out = await dispatchTool('so_fetch', { urls: [GOOD_URL] }, /** @type {any} */ ({
+      fetchPrimary: 'tinyfish',
+      fetchFallback: 'linkup',
+      tinyfishApiKey: 'test-key',
+      linkupApiKey: 'test-key',
+      fetchImpl: fallbackStub,
+    }));
+    assert.equal(out.fallbackUsed, true);
+    assert.deepEqual(out.providers, ['tinyfish', 'linkup']);
+    assert.equal(out.results.length, 1);
+    assert.equal(out.results[0].url, GOOD_URL);
+    assert.equal(out.errors.length, 0);
+  });
+});

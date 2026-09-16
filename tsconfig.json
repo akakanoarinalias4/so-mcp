@@ -1,0 +1,12 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "strict": true,
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "target": "es2022",
+    "noEmit": true
+  },
+  "include": ["lib/**/*", "api/**/*", "scripts/**/*", "tests/**/*"]
+}

@@ -1,0 +1,21 @@
+{
+  "name": "so-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "so-mcp: search/fetch/credits/verify MCP service on Vercel with pluggable providers.",
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test \"tests/*.test.js\"",
+    "typecheck": "tsc --noEmit",
+    "smoke": "node scripts/smoke.js",
+    "check": "npm run typecheck && npm test"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "typescript": "^5.9.2"
+  },
+  "engines": {
+    "node": "22.x"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "functions": {
+    "api/*.js": {
+      "maxDuration": 300
+    }
+  },
+  "rewrites": [
+    { "source": "/mcp", "destination": "/api/mcp" },
+    { "source": "/credits", "destination": "/api/credits" }
+  ]
+}
