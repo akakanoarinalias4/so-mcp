@@ -1,7 +1,7 @@
 # so-mcp
 
-Vercel 上的无状态 MCP 代理：统一搜索 / 抓取 / 验证，供应商可插拔。
-搜索默认 Linkup，抓取主 Tinyfish、回退 Linkup。零运行时依赖，原生 ESM，Node 22.x。
+Vercel 上的无状态 MCP 代理：统一搜索 / 抓取 / 验证，八家供应商可插拔。
+搜索默认扇出 Tinyfish+Tavily（免费优先），抓取默认分级 Tinyfish→Tavily（上限 5 级），验证逐条带引用。零运行时依赖，原生 ESM，Node 22.x。
 
 本说明面向模型调用方：照标准工作流四步依次调三工具即可完成时效核验。
 余额仅为人工查看用途，不参与工作流。
@@ -25,15 +25,17 @@ Vercel 上的无状态 MCP 代理：统一搜索 / 抓取 / 验证，供应商�
 
 协议工具恰三项：`so_search`、`so_fetch`、`so_verify`。余额不再作为协议工具暴露。
 
-- `so_search`：统一搜索。入参 `query`（必填）/`depth`（flash|fast|standard|deep）/
-  `outputType`（searchResults|sourcedAnswer|structured）/`fromDate`/`toDate`（YYYY-MM-DD）/
-  `maxResults`（1..50）/`includeDomains`/`excludeDomains`；
-  出参 `{provider, results:[{title,url,content}], answer?}`。
-- `so_fetch`：统一抓取。入参 `urls`（1..10 条）/`format`（markdown|html）/`ttl`/`perUrlTimeoutMs`；
-  出参 `{results, errors, fallbackUsed, providers}`，失败条目带 `retryable` 标记。
+- `so_search`：统一搜索。入参 `query`（必填）/`depth`/`outputType`/`fromDate`/`toDate`/
+  `maxResults`（1..50）/`includeDomains`/`excludeDomains`/`providers`（可选扇出名单）；
+  缺省走 `SEARCH_PROVIDER` 单源，传入 `providers` 时多源并行按 URL 去重合并，
+  出参 `{provider, providers?, results:[{title,url,content,provider,publishedDate?}], errors?, notes?}`。
+- `so_fetch`：统一抓取。入参 `urls`（1..10 条）/`format`/`ttl`/`perUrlTimeoutMs`/`chain`（可选分级名单，上限 5 级）；
+  缺省走主备，每级只补可重试失败，出参 `{results, errors, fallbackUsed, providers}`，失败条目带 `retryable` 标记。
 - `so_verify`：时效多信源交叉验证。入参 `query`（必填）/`fromDate`/`toDate`/`maxResults`（默认 8）/
-  `depth`（默认 standard）；先搜索取多源、按域名去重计数，再对 Top 地址抓取验时效，
-  出参 `{query, window, sources, fetched, distinctDomains, consistent, notes}`。
+  `depth`（默认 standard）/`searchProviders`（默认 tinyfish,tavily）/`fetchChain`（默认 tinyfish,tavily）；
+  先扇出搜索取多源、按域名去重计数，再对 Top 地址（最多 5 条）分级抓取验时效，
+  出参 `{query, window, sources, fetched, citations, distinctDomains, consistent, notes}`，
+  `citations` 为逐条引用（序号、来源、抓取一一对应），`sources` 每条带 `provider` 归属。
 
 ## 标准工作流四步
 
@@ -90,16 +92,25 @@ curl -s 'https://<应用>.vercel.app/credits' -H "Authorization: Bearer $PROXY_A
 名单为空（两上游密钥均缺配）才整体停机回 500 代理未配置，单键可运行。
 该端点同样走统一准入鉴权：无代理密钥回 `missing_api_key`，错密钥回 `invalid_api_key`。
 
-## 环境变量
-
 | 变量 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `PROXY_API_KEY` | 是 | — | 客户端出示给本代理的凭证（唯一需要配给客户端的密钥）。 |
-| `LINKUP_API_KEY` | 按名单 | — | Linkup 上游密钥（搜索 / 回退抓取 / 余额）。有一上游键即可运行，名单为空才 500 代理未配置。 |
-| `TINYFISH_API_KEY` | 按名单 | — | Tinyfish 上游密钥（主抓取 / 钱包）。有一上游键即可运行，名单为空才 500 代理未配置。 |
-| `SEARCH_PROVIDER` | 否 | `linkup` | 搜索供应商名。 |
-| `FETCH_PRIMARY` | 否 | `tinyfish` | 抓取主供应商名。 |
+| `LINKUP_API_KEY` | 按名单 | — | Linkup 上游密钥（搜索 / 回退抓取 / 余额）。九家任一非空即可运行。 |
+| `TINYFISH_API_KEY` | 按名单 | — | Tinyfish 上游密钥（免费搜索 / 主抓取 / 钱包）。九家任一非空即可运行。 |
+| `TAVILY_API_KEY` | 按名单 | — | Tavily 上游密钥（精排搜索 / 难页抓取）。九家任一非空即可运行。 |
+| `EXA_API_KEY` | 按名单 | — | Exa 上游密钥（语义搜索 / 提炼抓取）。九家任一非空即可运行。 |
+| `QUERIT_API_KEY` | 按名单 | — | Querit 上游密钥（英语补量搜索，免费版仅英文、单次≤10条、单站点）。九家任一非空即可运行。 |
+| `HASDATA_API_KEY` | 按名单 | — | HasData 上游密钥（垂直搜索 / 廉价抓取）。九家任一非空即可运行。 |
+| `FIRECRAWL_API_KEY` | 按名单 | — | Firecrawl 上游密钥（整站搜索 / 深耕抓取）。九家任一非空即可运行。 |
+| `SCRAPEDO_API_KEY` | 按名单 | — | Scrape.do 上游密钥（反爬攻坚抓取）。九家任一非空即可运行。 |
+| `SCRAPERAPI_API_KEY` | 按名单 | — | ScraperAPI 上游密钥（结构化兜底抓取）。九家任一非空即可运行。 |
+| `SEARCH_PROVIDER` | 否 | `linkup` | 单源搜索供应商名（老语义保留）。 |
+| `FETCH_PRIMARY` | 否 | `tinyfish` | 抓取主供应商名（老语义保留）。 |
 | `FETCH_FALLBACK` | 否 | `linkup` | 抓取回退供应商名（与主同名时不回退）。 |
+| `SEARCH_PROVIDERS` | 否 | `tinyfish,tavily` | 搜索扇出名单（逗号分隔，免费优先）。 |
+| `FETCH_CHAIN` | 否 | `tinyfish` | 抓取分级名单（逗号分隔，上限 5 级防烧钱）。 |
+| `VERIFY_SEARCH_PROVIDERS` | 否 | `tinyfish,tavily` | 验证搜索名单（逗号分隔）。 |
+| `VERIFY_FETCH_CHAIN` | 否 | `tinyfish,tavily` | 验证抓取名单（逗号分隔）。 |
 | `CREDITS_TIMEOUT_MS` | 否 | `15000` | 余额查询独立超时（毫秒），远小于函数执行上限。 |
 
 ## 部署与本地验证

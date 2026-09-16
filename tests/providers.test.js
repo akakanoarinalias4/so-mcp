@@ -1,7 +1,8 @@
 /**
  * tests/providers.test.js
  * 供应商层单测：全部用桩 fetchImpl，不打真实网络。
- * 覆盖搜索映射、抓取 retryable 标记、单条扇出、缺键抛码、回退链、余额端点鉴权、动态钱包单双空三态。
+ * 覆盖搜索映射、抓取 retryable 标记、单条扇出、缺键抛码、回退链、分级上限、搜索扇出、
+ * 余额端点鉴权、动态钱包单双空三态。
  */
 
 import { describe, it } from 'node:test';
@@ -212,6 +213,63 @@ describe('dispatchTool 回退链', () => {
     assert.equal(out.results.length, 1);
     assert.equal(out.results[0].url, GOOD_URL);
     assert.equal(out.errors.length, 0);
+  });
+
+  it('分级链上限 5 级且只补可重试失败', async () => {
+    /** @type {string[]} */
+    const seen = [];
+    /** @type {(url: string, init?: any) => Promise<any>} 按地址分流的桩 */
+    const chainStub = async (url) => {
+      seen.push(String(url));
+      return stubResponse({
+        results: [{ url: GOOD_URL, title: '首级成功', text: '正文' }],
+        errors: [{ url: BAD_URL, error: 'page_not_found', retryable: false }],
+      });
+    };
+    const out = await dispatchTool(
+      'so_fetch',
+      { urls: [GOOD_URL, BAD_URL], chain: ['tinyfish', 'tavily', 'exa', 'hasdata', 'firecrawl', 'scrapedo'] },
+      /** @type {any} */ ({ tinyfishApiKey: 'test-key', tavilyApiKey: 'test-key', fetchImpl: chainStub }),
+    );
+    // 不可重试失败直接保留，不应触发后续分级。
+    assert.deepEqual(out.providers, ['tinyfish']);
+    assert.equal(out.fallbackUsed, false);
+    assert.equal(out.results.length, 1);
+    assert.equal(out.errors.length, 1);
+    assert.equal(out.errors[0].retryable, false);
+    assert.deepEqual(seen, [TINYFISH_FETCH_URL]);
+  });
+});
+
+/** 搜索扇出：多源并行按 URL 去重，失败不阻断，来源可追溯。 */
+describe('dispatchTool 搜索扇出', () => {
+  it('双源合并去重且保留首见 provider', async () => {
+    /** @type {(url: string, init?: any) => Promise<any>} 按供应商分流的桩 */
+    const fanoutStub = async (url) => {
+      const text = String(url);
+      if (text.includes('tinyfish')) {
+        return stubResponse({
+          results: [{ title: '免费标题', url: 'https://case.local/dup', snippet: '免费正文' }],
+        });
+      }
+      return stubResponse({
+        results: [
+          { title: '精排标题', url: 'https://case.local/only', content: '精排正文' },
+          { title: '重复标题', url: 'https://case.local/dup', content: '重复正文' },
+        ],
+      });
+    };
+    const out = await dispatchTool('so_search', { query: '扇出', providers: ['tinyfish', 'tavily'] }, /** @type {any} */ ({
+      tinyfishApiKey: 'test-key',
+      tavilyApiKey: 'test-key',
+      searchUrlTinyfish: 'https://tinyfish.local/search',
+      searchUrlTavily: 'https://tavily.local/search',
+      fetchImpl: fanoutStub,
+    }));
+    assert.equal(out.provider, 'fanout');
+    assert.deepEqual(out.providers, ['tinyfish', 'tavily']);
+    assert.equal(out.results.length, 2);
+    assert.equal(out.results.find((/** @type {any} */ item) => item.url === 'https://case.local/dup')?.provider, 'tinyfish');
   });
 });
 

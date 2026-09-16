@@ -2,7 +2,8 @@
  * scripts/smoke.js
  * 本地冒烟：零依赖、不联网，全部用桩 fetchImpl 代替上游。
  * 覆盖 initialize 回服务名 / tools.list 回三工具名 / so_search 映射正确 /
- * so_fetch 回退链正确 / handleCredits 动态键双家 OK 且无汇总字段 /
+ * so_fetch 回退链正确 / 搜索扇出去重正确 / 验证引用装配正确 /
+ * handleCredits 动态键双家 OK 且无汇总字段 /
  * 空名单回代理未配置 / 单家只回单键。
  * 任一步失败即非零退出；全部通过打印中文通过行。
  */
@@ -42,9 +43,6 @@ function stubResponse(data, status = 200) {
  */
 async function stubFetch(url, init = {}) {
   const text = String(url);
-  if (text.includes('/v1/search')) {
-    return stubResponse({ results: STUB_SEARCH_RESULTS });
-  }
   if (text.includes('credits/balance')) {
     return stubResponse({ balance: 1234 });
   }
@@ -54,6 +52,16 @@ async function stubFetch(url, init = {}) {
   if (text.includes('/v1/fetch')) {
     const body = JSON.parse(init.body || '{}');
     return stubResponse({ url: body.url, title: '冒烟抓取', markdown: '冒烟抓取正文' });
+  }
+  if (text.includes('api.search.tinyfish.ai')) {
+    return stubResponse({
+      results: [
+        { title: '冒烟 tinyfish', url: 'https://smoke.local/tinyfish', snippet: '正文' },
+      ],
+    });
+  }
+  if (text.includes('/v1/search')) {
+    return stubResponse({ results: STUB_SEARCH_RESULTS });
   }
   if (text.includes('tinyfish')) {
     const body = JSON.parse(init.body || '{}');
@@ -148,7 +156,46 @@ async function main() {
   check((fetchPayload.errors || []).length === 0, 'so_fetch 回退后 errors 应为空');
   console.log('通过：tools/call so_fetch 回退链正确');
 
-  // 5. handleCredits 动态键双家：两家余额并行查到，无汇总字段（持有者令牌鉴权）。
+  // 4b. tools/call so_search 扇出：双源并行按 URL 去重，保留首见 provider。
+  // 同名去重后只剩单源会走老语义，故用两个不同源触发扇出（桩按地址路由，同负载去重后 2 条）。
+  const fanoutRes = await handleMcpRequest(
+    {
+      jsonrpc: '2.0',
+      id: 41,
+      method: 'tools/call',
+      params: { name: 'so_search', arguments: { query: '冒烟关键词', providers: ['tinyfish', 'linkup'] } },
+    },
+    {
+      tinyfishApiKey: 'smoke-tinyfish-key',
+      linkupApiKey: 'smoke-linkup-key',
+      fetchImpl: stubFetch,
+    },
+  );
+  const fanoutPayload = JSON.parse(fanoutRes?.result?.content?.[0]?.text || '{}');
+  check(fanoutPayload.provider === 'fanout', 'so_search 扇出未返回 fanout 标记');
+  check(Array.isArray(fanoutPayload.results) && fanoutPayload.results.length === 3, 'so_search 扇出去重后应为 3 条');
+  console.log('通过：tools/call so_search 扇出去重正确');
+
+  // 4c. tools/call so_verify：逐条引用与来源追溯装配正确（显式 tinyfish+linkup 双源共 3 源）。
+  const verifyRes = await handleMcpRequest(
+    {
+      jsonrpc: '2.0',
+      id: 42,
+      method: 'tools/call',
+      params: { name: 'so_verify', arguments: { query: '冒烟关键词', maxResults: 3, searchProviders: ['tinyfish', 'linkup'], fetchChain: ['linkup'] } },
+    },
+    {
+      tinyfishApiKey: 'smoke-tinyfish-key',
+      linkupApiKey: 'smoke-linkup-key',
+      fetchImpl: stubFetch,
+    },
+  );
+  const verifyPayload = JSON.parse(verifyRes?.result?.content?.[0]?.text || '{}');
+  check(Array.isArray(verifyPayload.sources) && verifyPayload.sources.length === 3, 'so_verify 来源应为 3 条');
+  check(Array.isArray(verifyPayload.citations) && verifyPayload.citations.length === 3, 'so_verify 引用应逐条对应');
+  check(verifyPayload.citations[0]?.index === 1 && verifyPayload.citations[2]?.index === 3, 'so_verify 引用序号错误');
+  check(typeof verifyPayload.citations[0]?.source?.provider === 'string', 'so_verify 引用缺少来源归属');
+  console.log('通过：tools/call so_verify 引用装配正确');
   const okRequest = new Request('https://smoke.local/credits', {
     headers: { Authorization: 'Bearer ' + PROXY_KEY },
   });
