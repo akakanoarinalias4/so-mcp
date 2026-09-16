@@ -2,7 +2,7 @@
  * scripts/smoke.js
  * 本地冒烟：零依赖、不联网，全部用桩 fetchImpl 代替上游。
  * 覆盖 initialize 回服务名 / tools.list 回三工具名 / so_search 映射正确 /
- * so_fetch 回退链正确 / handleCredits 双 OK 与缺 Key 双 skipped。
+ * so_fetch 回退链正确 / handleCredits 双 OK 与缺上游键回代理未配置。
  * 任一步失败即非零退出；全部通过打印中文通过行。
  */
 
@@ -145,9 +145,9 @@ async function main() {
   check((fetchPayload.errors || []).length === 0, 'so_fetch 回退后 errors 应为空');
   console.log('通过：tools/call so_fetch 回退链正确');
 
-  // 5. handleCredits 双 OK：两家余额并行查到。
+  // 5. handleCredits 双 OK：两家余额并行查到（持有者令牌鉴权）。
   const okRequest = new Request('https://smoke.local/credits', {
-    headers: { 'x-api-key': PROXY_KEY },
+    headers: { Authorization: 'Bearer ' + PROXY_KEY },
   });
   const okResponse = await handleCredits(
     okRequest,
@@ -170,20 +170,18 @@ async function main() {
   check(okBody?.data?.tinyfish?.provider === 'tinyfish', 'handleCredits tinyfish 钱包缺失');
   console.log('通过：handleCredits 双 Key 下两家余额均 OK');
 
-  // 6. handleCredits 缺 Key：两家记 skipped 而不是报错。
+  // 6. handleCredits 缺上游键：部署未配置回 500 代理未配置。
   const skipRequest = new Request('https://smoke.local/credits', {
-    headers: { 'x-api-key': PROXY_KEY },
+    headers: { Authorization: 'Bearer ' + PROXY_KEY },
   });
   const skipResponse = await handleCredits(
     skipRequest,
     { env: { PROXY_API_KEY: PROXY_KEY }, fetchImpl: stubFetch },
   );
   const skipBody = await skipResponse.json();
-  check(
-    skipBody?.data?.linkup?.skipped === true && skipBody?.data?.tinyfish?.skipped === true,
-    'handleCredits 缺 Key 时未双双记 skipped',
-  );
-  console.log('通过：handleCredits 缺 Key 时双双记 skipped');
+  check(skipResponse.status === 500, 'handleCredits 缺上游键时未回 500');
+  check(skipBody?.error === 'proxy_misconfigured', 'handleCredits 缺上游键时未报代理未配置');
+  console.log('通过：handleCredits 缺上游键时回 500 代理未配置');
 
   console.log('冒烟全部通过');
 }

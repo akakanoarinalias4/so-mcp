@@ -13,13 +13,12 @@ Vercel 上的无状态 MCP 代理：统一搜索 / 抓取 / 验证，供应商�
 - `POST /mcp`：Streamable HTTP，无状态，仅 POST 承载 JSON-RPC。
 - `GET /credits`：独立余额快照，仅人工查额度，不参与工作流。
 
-出示代理密钥三选一（优先级无关）：
+出示代理密钥只有唯一方式：
 
-1. `x-api-key: <PROXY_API_KEY>` 请求头；
-2. `Authorization: Bearer <PROXY_API_KEY>` 请求头；
-3. `?apiKey=<PROXY_API_KEY>` 查询参数（无法设置请求头的客户端兜底）。
+- `Authorization: Bearer <PROXY_API_KEY>` 请求头。
 
-缺出示回 `missing_api_key`，出示值与部署的 `PROXY_API_KEY` 不一致回 `invalid_api_key`。
+历史上的 `x-api-key` 请求头与 `?apiKey=` 查询参数已废止，一律视作未提供，回 `missing_api_key`。
+出示方式正确但值与部署的 `PROXY_API_KEY` 不一致，回 `invalid_api_key`。
 上游密钥只读服务端环境变量，永不回传客户端、不打日志，客户端只持有 `PROXY_API_KEY`。
 
 ## 三工具详解
@@ -50,7 +49,7 @@ Vercel 上的无状态 MCP 代理：统一搜索 / 抓取 / 验证，供应商�
 
 ```bash
 curl -s 'https://<应用>.vercel.app/mcp' \
-  -H 'content-type: application/json' -H "x-api-key: $PROXY_API_KEY" \
+  -H 'content-type: application/json' -H "Authorization: Bearer $PROXY_API_KEY" \
   -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"so_verify","arguments":{"query":"mcp search api","maxResults":8}}}'
 ```
 
@@ -59,12 +58,12 @@ curl -s 'https://<应用>.vercel.app/mcp' \
 ```bash
 # 第 1 步：搜索取多源
 curl -s 'https://<应用>.vercel.app/mcp' \
-  -H 'content-type: application/json' -H "x-api-key: $PROXY_API_KEY" \
+  -H 'content-type: application/json' -H "Authorization: Bearer $PROXY_API_KEY" \
   -d '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"so_search","arguments":{"query":"mcp search api","maxResults":8}}}'
 
 # 第 3 步：对挑出的地址抓取验时效（域名去重与一致性判定在模型侧做）
 curl -s 'https://<应用>.vercel.app/mcp' \
-  -H 'content-type: application/json' -H "x-api-key: $PROXY_API_KEY" \
+  -H 'content-type: application/json' -H "Authorization: Bearer $PROXY_API_KEY" \
   -d '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"so_fetch","arguments":{"urls":["https://example.com/a"]}}}'
 ```
 
@@ -82,11 +81,12 @@ curl -s 'https://<应用>.vercel.app/mcp' \
 需人工确认剩余额度时，直接查独立端点：
 
 ```bash
-curl -s 'https://<应用>.vercel.app/credits' -H "x-api-key: $PROXY_API_KEY"
+curl -s 'https://<应用>.vercel.app/credits' -H "Authorization: Bearer $PROXY_API_KEY"
 # {"success":true,"data":{"linkup":{...},"tinyfish":{...}},"checkedAt":"..."}
 ```
 
-两家并行查询，一家缺 Key 或失败都不阻塞另一家（缺 Key 记 `skipped`）。
+两家并行查询，一家失败不阻塞另一家；但 `LINKUP_API_KEY` 与 `TINYFISH_API_KEY` 均为必填，
+任一缺配整体直接停机回 500 代理未配置，不再记跳过。
 该端点同样走统一准入鉴权：无代理密钥回 `missing_api_key`，错密钥回 `invalid_api_key`。
 
 ## 环境变量
@@ -94,8 +94,8 @@ curl -s 'https://<应用>.vercel.app/credits' -H "x-api-key: $PROXY_API_KEY"
 | 变量 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `PROXY_API_KEY` | 是 | — | 客户端出示给本代理的凭证（唯一需要配给客户端的密钥）。 |
-| `LINKUP_API_KEY` | 否 | — | Linkup 上游密钥（搜索 / 回退抓取 / 余额）。缺则相关调用记 `skipped` 或报错，不阻断另一家。 |
-| `TINYFISH_API_KEY` | 否 | — | Tinyfish 上游密钥（主抓取 / 钱包）。缺则主抓取走回退、钱包记 `skipped`。 |
+| `LINKUP_API_KEY` | 是 | — | Linkup 上游密钥（搜索 / 回退抓取 / 余额）。缺配即 500 代理未配置，不再跳过。 |
+| `TINYFISH_API_KEY` | 是 | — | Tinyfish 上游密钥（主抓取 / 钱包）。缺配即 500 代理未配置，不再跳过。 |
 | `SEARCH_PROVIDER` | 否 | `linkup` | 搜索供应商名。 |
 | `FETCH_PRIMARY` | 否 | `tinyfish` | 抓取主供应商名。 |
 | `FETCH_FALLBACK` | 否 | `linkup` | 抓取回退供应商名（与主同名时不回退）。 |
@@ -104,19 +104,19 @@ curl -s 'https://<应用>.vercel.app/credits' -H "x-api-key: $PROXY_API_KEY"
 ## 部署与本地验证
 
 1. 把本仓库导入 Vercel（Import Git，框架选 Other）。
-2. 在项目 Settings → Environment Variables 设置上表变量（至少 `PROXY_API_KEY`）。
+2. 在项目 Settings → Environment Variables 设置上表变量（`PROXY_API_KEY`、`LINKUP_API_KEY`、`TINYFISH_API_KEY` 三密钥均须设置，缺一不可）。
 3. 点 Deploy，得到 `https://<应用>.vercel.app`。
 4. 验证 MCP 握手：
    ```bash
    curl -s 'https://<应用>.vercel.app/mcp' \
      -H 'content-type: application/json' \
-     -H "x-api-key: $PROXY_API_KEY" \
+     -H "Authorization: Bearer $PROXY_API_KEY" \
      -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}'
    ```
 5. 验证工具列表（应恰为搜、抓、验证三项）：
    ```bash
    curl -s 'https://<应用>.vercel.app/mcp' \
-     -H 'content-type: application/json' -H "x-api-key: $PROXY_API_KEY" \
+     -H 'content-type: application/json' -H "Authorization: Bearer $PROXY_API_KEY" \
      -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
    ```
 6. 本地冒烟（不联网，桩代替上游）：`node scripts/smoke.js`；跑单测：`npm test`。
@@ -128,11 +128,127 @@ MCP 客户端 JSON 配置示例（按客户端文档把域名与密钥填入）�
   "mcpServers": {
     "so-mcp": {
       "url": "https://<应用>.vercel.app/mcp",
-      "headers": { "x-api-key": "<PROXY_API_KEY>" }
+      "headers": { "Authorization": "Bearer <PROXY_API_KEY>" }
     }
   }
 }
 ```
+
+## 客户端实测接入（本仓库验证过的客户端）
+
+> 实测客户端配置文件为 `~/.omp/agent/mcp.json`，结构为顶层 `mcpServers` 映射服务名到 `{url, headers}`。
+> 下例与该文件现有 `tavily` 条目同构，仅服务名、地址、令牌不同，可直接对照抄写。
+
+```bash
+# 1. 打开客户端服务配置文件（不存在则新建）
+# 文件位置：~/.omp/agent/mcp.json
+# 若该文件已有 mcpServers，仅在其中追加 so-mcp 一项，不要覆盖既有条目
+cat ~/.omp/agent/mcp.json
+```
+
+```json
+{
+  "mcpServers": {
+    "tavily": {
+      "url": "https://gw-kano.duckdns.org:8443/tavily/mcp",
+      "headers": { "Authorization": "Bearer sk-sui" }
+    },
+    "so-mcp": {
+      "url": "https://<应用>.vercel.app/mcp",
+      "headers": { "Authorization": "Bearer <PROXY_API_KEY>" }
+    }
+  }
+}
+```
+
+```bash
+# 2. 改完重载客户端使其读新配置，然后发一句让模型列工具自检
+# 例如新开一轮对话让模型调 so_verify 做一次小查询：
+# “用 so-mcp 的 so_verify 查一下 mcp search api（maxResults 传 2），只看链路通不通”
+# 3. 若模型报 401，先对照排错表查鉴权头，再确认服务端三密钥与重部署
+```
+
+
+## 模型接入完整步骤
+
+给新模型一次配通可用的完整路径，照序执行即可。
+
+### 1. 前置条件
+
+- 已部署得到域名 `https://<应用>.vercel.app`。
+- 服务端已设置三密钥，缺一不可：`PROXY_API_KEY`、`LINKUP_API_KEY`、`TINYFISH_API_KEY`。
+- 本地拿到可用的代理密钥明文 `$PROXY_API_KEY`。
+
+### 2. 获取接入三要素
+
+- 域名：`https://<应用>.vercel.app`。
+- 代理密钥：`$PROXY_API_KEY`（客户端唯一需要持有的密钥）。
+- 协议地址：`https://<应用>.vercel.app/mcp`（`POST`，Streamable HTTP，JSON-RPC）。
+
+上游两密钥只放 Vercel 服务端环境变量，永不写入客户端配置。
+
+### 3. 客户端配置
+
+通用可复制 JSON，把域名与代理密钥填入即可：
+
+```json
+{
+  "mcpServers": {
+    "so-mcp": {
+      "url": "https://<应用>.vercel.app/mcp",
+      "headers": { "Authorization": "Bearer <PROXY_API_KEY>" }
+    }
+  }
+}
+```
+
+鉴权头固定为 `Authorization: Bearer <PROXY_API_KEY>`，别无他法。
+
+### 4. 连通自检三命令
+
+把 `<应用>` 换成真实域名后依次执行：
+
+```bash
+# 自检 1：握手应回版本与能力
+curl -s 'https://<应用>.vercel.app/mcp' \
+  -H 'content-type: application/json' \
+  -H "Authorization: Bearer $PROXY_API_KEY" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}'
+
+# 自检 2：工具列表应恰为 so_search、so_fetch、so_verify 三项
+curl -s 'https://<应用>.vercel.app/mcp' \
+  -H 'content-type: application/json' -H "Authorization: Bearer $PROXY_API_KEY" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+
+# 自检 3：一键验证小查询走通 dry-run
+curl -s 'https://<应用>.vercel.app/mcp' \
+  -H 'content-type: application/json' -H "Authorization: Bearer $PROXY_API_KEY" \
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"so_verify","arguments":{"query":"mcp search api","maxResults":2}}}'
+```
+
+### 5. 模型侧调用顺序
+
+- 先调一键链路 `so_verify` 做小查询验证链路可用。
+- 一键结果可用则直接用；需自行取舍来源时再按标准工作流分步调 `so_search`、`so_fetch`。
+- 时效核验只走搜、抓、验证三工具，永不插余额调用。
+
+### 6. 余额人工查看命令
+
+```bash
+curl -s 'https://<应用>.vercel.app/credits' -H "Authorization: Bearer $PROXY_API_KEY"
+```
+
+仅供人工确认剩余额度，不参与模型工作流。
+
+### 7. 排错对照表
+
+| 现象 | 原因 | 处理 |
+| --- | --- | --- |
+| `401 missing_api_key` | 未带 `Authorization: Bearer` 头，或用了已废止的旧头与查询参数 | 改为 `Authorization: Bearer $PROXY_API_KEY` 重试 |
+| `401 invalid_api_key` | 令牌值与服务端 `PROXY_API_KEY` 不一致 | 核对客户端密钥与 Vercel 服务端变量是否一致 |
+| `500 代理未配置` | `LINKUP_API_KEY` 或 `TINYFISH_API_KEY` 缺配 | 补齐服务端两上游密钥后重新部署 |
+| `429 限流` | 上游限流或配额不足 | 降低并发、减小 `maxResults`，稍后重试，必要时查余额确认额度 |
+| `504 超时` | 大批量抓取超出函数执行时长 | 按超时拆分：每次 `so_fetch` 传 ≤10 条，多次分批抓取；余额侧检查 `CREDITS_TIMEOUT_MS` |
 
 ## 避坑
 

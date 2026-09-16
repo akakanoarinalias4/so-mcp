@@ -160,7 +160,7 @@ describe('dispatchTool 回退链', () => {
   });
 });
 
-/** 余额端点鉴权：独立 /credits 端点无代理密钥与错密钥均回 401 未授权。 */
+/** 余额端点鉴权：独立 /credits 端点无令牌、错令牌与旧出示方式均回 401 未授权。 */
 describe('handleCredits 余额端点鉴权', () => {
   it('无代理密钥回缺密钥', async () => {
     /** @type {(url: string) => Promise<any>} 不应被调用的上游桩 */
@@ -170,7 +170,7 @@ describe('handleCredits 余额端点鉴权', () => {
     const request = new Request('https://case.local/credits');
     const response = await handleCredits(
       request,
-      { env: { PROXY_API_KEY: PROXY_KEY }, fetchImpl: neverStub },
+      { env: { PROXY_API_KEY: PROXY_KEY, LINKUP_API_KEY: 'test-linkup-key', TINYFISH_API_KEY: 'test-tinyfish-key' }, fetchImpl: neverStub },
     );
     assert.equal(response.status, 401);
     const body = await response.json();
@@ -178,21 +178,55 @@ describe('handleCredits 余额端点鉴权', () => {
     assert.equal(body.error, 'missing_api_key');
   });
 
-  it('错代理密钥回无效密钥', async () => {
+  it('错持有者令牌回无效密钥', async () => {
     /** @type {(url: string) => Promise<any>} 不应被调用的上游桩 */
     const neverStub = async () => {
       throw new Error('未授权时不应触碰上游');
     };
     const request = new Request('https://case.local/credits', {
-      headers: { 'x-api-key': 'wrong-key' },
+      headers: { authorization: 'Bearer wrong-key' },
     });
     const response = await handleCredits(
       request,
-      { env: { PROXY_API_KEY: PROXY_KEY }, fetchImpl: neverStub },
+      { env: { PROXY_API_KEY: PROXY_KEY, LINKUP_API_KEY: 'test-linkup-key', TINYFISH_API_KEY: 'test-tinyfish-key' }, fetchImpl: neverStub },
     );
     assert.equal(response.status, 401);
     const body = await response.json();
     assert.equal(body.success, false);
     assert.equal(body.error, 'invalid_api_key');
+  });
+
+  it('旧自定义头带正确值仍回缺密钥', async () => {
+    /** @type {(url: string) => Promise<any>} 不应被调用的上游桩 */
+    const neverStub = async () => {
+      throw new Error('未授权时不应触碰上游');
+    };
+    const request = new Request('https://case.local/credits', {
+      headers: { 'x-api-key': PROXY_KEY },
+    });
+    const response = await handleCredits(
+      request,
+      { env: { PROXY_API_KEY: PROXY_KEY, LINKUP_API_KEY: 'test-linkup-key', TINYFISH_API_KEY: 'test-tinyfish-key' }, fetchImpl: neverStub },
+    );
+    assert.equal(response.status, 401);
+    const body = await response.json();
+    assert.equal(body.success, false);
+    assert.equal(body.error, 'missing_api_key');
+  });
+
+  it('旧查询参数带正确值仍回缺密钥', async () => {
+    /** @type {(url: string) => Promise<any>} 不应被调用的上游桩 */
+    const neverStub = async () => {
+      throw new Error('未授权时不应触碰上游');
+    };
+    const request = new Request(`https://case.local/credits?apiKey=${PROXY_KEY}`);
+    const response = await handleCredits(
+      request,
+      { env: { PROXY_API_KEY: PROXY_KEY, LINKUP_API_KEY: 'test-linkup-key', TINYFISH_API_KEY: 'test-tinyfish-key' }, fetchImpl: neverStub },
+    );
+    assert.equal(response.status, 401);
+    const body = await response.json();
+    assert.equal(body.success, false);
+    assert.equal(body.error, 'missing_api_key');
   });
 });
