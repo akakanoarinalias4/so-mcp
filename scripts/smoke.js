@@ -20,6 +20,8 @@ const STUB_SEARCH_RESULTS = [
 
 /** 回退链冒烟的目标地址（主供应商可重试失败，回退成功）。 */
 const FALLBACK_URL = 'https://smoke.local/fallback';
+/** Tinyfish 钱包地址（与实现默认值对齐，钱包与智能体同宿主，与抓取宿主分离）。 */
+const TINYFISH_WALLET_URL = 'https://agent.tinyfish.ai/v1/wallet';
 
 /**
  * 构造桩 Response（只实现调用方用到的 ok/status/json）。
@@ -45,7 +47,7 @@ async function stubFetch(url, init = {}) {
   if (text.includes('credits/balance')) {
     return stubResponse({ balance: 1234 });
   }
-  if (text.includes('wallet')) {
+  if (text === TINYFISH_WALLET_URL || text.includes('agent.tinyfish.ai/v1/wallet')) {
     return stubResponse({ wallet: { credits: 5678 } });
   }
   if (text.includes('/v1/fetch')) {

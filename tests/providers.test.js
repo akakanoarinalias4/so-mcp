@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { linkupSearch } from '../lib/providers/search-linkup.js';
 import { tinyfishFetch } from '../lib/providers/fetch-tinyfish.js';
 import { linkupFetch } from '../lib/providers/fetch-linkup.js';
-import { getLinkupBalance } from '../lib/credits.js';
+import { getLinkupBalance, getTinyfishWallet } from '../lib/credits.js';
 import { dispatchTool } from '../lib/tools.js';
 import { handleCredits } from '../lib/endpoints/credits.js';
 
@@ -17,6 +17,8 @@ import { handleCredits } from '../lib/endpoints/credits.js';
 const SEARCH_MARK = '/v1/search';
 /** Tinyfish 抓取地址（与实现默认值对齐）。 */
 const TINYFISH_FETCH_URL = 'https://api.fetch.tinyfish.ai';
+/** Tinyfish 钱包地址（与实现默认值对齐，钱包与智能体同宿主，与抓取宿主分离）。 */
+const TINYFISH_WALLET_URL = 'https://agent.tinyfish.ai/v1/wallet';
 /** 回退成功的目标地址。 */
 const GOOD_URL = 'https://case.local/good';
 /** 回退失败的目标地址。 */
@@ -125,6 +127,59 @@ describe('getLinkupBalance 缺 Key', () => {
     await assert.rejects(
       getLinkupBalance({ fetchImpl: neverStub }),
       (/** @type {any} */ error) => (/** @type {any} */ (error)).code === 'CREDENTIAL_MISSING',
+    );
+  });
+});
+
+/** 钱包默认宿主：钱包与智能体同宿主，缺键抛码、鉴权四态不断言旧抓取宿主。 */
+describe('getTinyfishWallet 默认钱包宿主', () => {
+  it('缺 Key 抛 CREDENTIAL_MISSING', async () => {
+    /** @type {(url: string) => Promise<any>} 不应被调用的桩 */
+    const neverStub = async () => {
+      throw new Error('缺 Key 时不应发起请求');
+    };
+    await assert.rejects(
+      getTinyfishWallet({ fetchImpl: neverStub }),
+      (/** @type {any} */ error) => (/** @type {any} */ (error)).code === 'CREDENTIAL_MISSING',
+    );
+  });
+
+  it('默认请求智能体侧钱包地址', async () => {
+    /** @type {string[]} 收到的请求地址 */
+    const seen = [];
+    /** @type {(url: string) => Promise<any>} 记录地址的桩 */
+    const recordStub = async (url) => {
+      seen.push(String(url));
+      return stubResponse({ wallet: { credits: 1 } });
+    };
+    const out = await getTinyfishWallet({ tinyfishApiKey: 'test-key', fetchImpl: recordStub });
+    assert.equal(out.provider, 'tinyfish');
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0], TINYFISH_WALLET_URL);
+  });
+
+  it('鉴权四态：401/403 抛 CREDENTIAL_MISSING，其余非 2xx 抛 UPSTREAM_ERROR', async () => {
+    for (const status of [401, 403]) {
+      /** @type {(url: string) => Promise<any>} 固定鉴权失败的桩 */
+      const authStub = async () => stubResponse({ message: 'unauthorized' }, status);
+      await assert.rejects(
+        getTinyfishWallet({ tinyfishApiKey: 'test-key', fetchImpl: authStub }),
+        (/** @type {any} */ error) => (/** @type {any} */ (error)).code === 'CREDENTIAL_MISSING',
+      );
+    }
+    /** @type {(url: string) => Promise<any>} 固定服务端异常的桩 */
+    const errorStub = async () => stubResponse({ message: 'boom' }, 500);
+    await assert.rejects(
+      getTinyfishWallet({ tinyfishApiKey: 'test-key', fetchImpl: errorStub }),
+      (/** @type {any} */ error) => (/** @type {any} */ (error)).code === 'UPSTREAM_ERROR',
+    );
+    /** @type {(url: string) => Promise<any>} 固定超时的桩 */
+    const timeoutStub = async () => {
+      throw Object.assign(new Error('The operation was aborted'), { name: 'TimeoutError' });
+    };
+    await assert.rejects(
+      getTinyfishWallet({ tinyfishApiKey: 'test-key', fetchImpl: timeoutStub }),
+      (/** @type {any} */ error) => (/** @type {any} */ (error)).code === 'UPSTREAM_TIMEOUT',
     );
   });
 });
