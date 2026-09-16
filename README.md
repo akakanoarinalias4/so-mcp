@@ -1,7 +1,7 @@
 # so-mcp
 
-Vercel 上的无状态 MCP 代理：统一搜索 / 抓取 / 验证，八家供应商可插拔。
-搜索默认扇出 Tinyfish+Tavily（免费优先），抓取默认分级 Tinyfish→Tavily（上限 5 级），验证逐条带引用。零运行时依赖，原生 ESM，Node 22.x。
+Vercel 上的无状态 MCP 代理：统一搜索 / 抓取 / 验证，八家供应商并行分工。
+搜索六家同时扇出（Tinyfish+Tavily+Exa+Querit+HasData+Firecrawl），抓取八家按地址分片同时开打，验证逐条带引用。零运行时依赖，原生 ESM，Node 22.x。
 
 本说明面向模型调用方：照标准工作流四步依次调三工具即可完成时效核验。
 余额仅为人工查看用途，不参与工作流。
@@ -105,12 +105,12 @@ curl -s 'https://<应用>.vercel.app/credits' -H "Authorization: Bearer $PROXY_A
 | `SCRAPEDO_API_KEY` | 按名单 | — | Scrape.do 上游密钥（反爬攻坚抓取）。九家任一非空即可运行。 |
 | `SCRAPERAPI_API_KEY` | 按名单 | — | ScraperAPI 上游密钥（结构化兜底抓取）。九家任一非空即可运行。 |
 | `SEARCH_PROVIDER` | 否 | `linkup` | 单源搜索供应商名（老语义保留）。 |
-| `FETCH_PRIMARY` | 否 | `tinyfish` | 抓取主供应商名（老语义保留）。 |
-| `FETCH_FALLBACK` | 否 | `linkup` | 抓取回退供应商名（与主同名时不回退）。 |
-| `SEARCH_PROVIDERS` | 否 | `tinyfish,tavily` | 搜索扇出名单（逗号分隔，免费优先）。 |
-| `FETCH_CHAIN` | 否 | `tinyfish` | 抓取分级名单（逗号分隔，上限 5 级防烧钱）。 |
-| `VERIFY_SEARCH_PROVIDERS` | 否 | `tinyfish,tavily` | 验证搜索名单（逗号分隔）。 |
-| `VERIFY_FETCH_CHAIN` | 否 | `tinyfish,tavily` | 验证抓取名单（逗号分隔）。 |
+| `FETCH_PRIMARY` | 否 | `tinyfish` | 单级抓取供应商名（老语义保留）。 |
+| `FETCH_FALLBACK` | 否 | `linkup` | 单级回退供应商名（老语义保留）。 |
+| `SEARCH_PROVIDERS` | 否 | 六家搜索并行 | 搜索扇出名单（逗号分隔，八家搜索全部并行：tinyfish,tavily,exa,querit,hasdata,firecrawl）。 |
+| `FETCH_CHAIN` | 否 | 八家抓取并行 | 抓取并行名单（逗号分隔，上限 8 级，按地址轮转分片同时开打）。 |
+| `VERIFY_SEARCH_PROVIDERS` | 否 | 六家搜索并行 | 验证搜索名单（逗号分隔）。 |
+| `VERIFY_FETCH_CHAIN` | 否 | 八家抓取并行 | 验证抓取名单（逗号分隔）。 |
 | `CREDITS_TIMEOUT_MS` | 否 | `15000` | 余额查询独立超时（毫秒），远小于函数执行上限。 |
 
 ## 部署与本地验证

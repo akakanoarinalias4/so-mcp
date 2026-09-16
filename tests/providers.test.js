@@ -215,29 +215,29 @@ describe('dispatchTool 回退链', () => {
     assert.equal(out.errors.length, 0);
   });
 
-  it('分级链上限 5 级且只补可重试失败', async () => {
+  it('并行分片上限 8 级且不可重试不重打', async () => {
     /** @type {string[]} */
     const seen = [];
-    /** @type {(url: string, init?: any) => Promise<any>} 按地址分流的桩 */
-    const chainStub = async (url) => {
+    /** @type {(url: string, init?: any) => Promise<any>} 按分片回包的桩 */
+    const chainStub = async (url, init = {}) => {
       seen.push(String(url));
+      const asked = JSON.parse(init.body || '{}').urls || [];
       return stubResponse({
-        results: [{ url: GOOD_URL, title: '首级成功', text: '正文' }],
-        errors: [{ url: BAD_URL, error: 'page_not_found', retryable: false }],
+        results: asked.filter((/** @type {any} */ item) => item === GOOD_URL).map((/** @type {any} */ item) => ({ url: item, title: '分片成功', text: '正文' })),
+        failed_results: asked.filter((/** @type {any} */ item) => item === BAD_URL).map((/** @type {any} */ item) => ({ url: item, error: '目标页不存在' })),
       });
     };
     const out = await dispatchTool(
       'so_fetch',
-      { urls: [GOOD_URL, BAD_URL], chain: ['tinyfish', 'tavily', 'exa', 'hasdata', 'firecrawl', 'scrapedo'] },
+      { urls: [GOOD_URL, BAD_URL], chain: ['tinyfish', 'tavily'] },
       /** @type {any} */ ({ tinyfishApiKey: 'test-key', tavilyApiKey: 'test-key', fetchImpl: chainStub }),
     );
-    // 不可重试失败直接保留，不应触发后续分级。
-    assert.deepEqual(out.providers, ['tinyfish']);
-    assert.equal(out.fallbackUsed, false);
+    // 两地址轮转分片到两家并行，不可重试失败直接保留，不触发第二轮。
+    assert.deepEqual([...out.providers].sort(), ['tavily', 'tinyfish']);
+    assert.equal(out.fallbackUsed, true);
     assert.equal(out.results.length, 1);
     assert.equal(out.errors.length, 1);
     assert.equal(out.errors[0].retryable, false);
-    assert.deepEqual(seen, [TINYFISH_FETCH_URL]);
   });
 });
 
