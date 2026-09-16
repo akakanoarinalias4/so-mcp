@@ -1,7 +1,7 @@
 /**
  * tests/providers.test.js
  * 供应商层单测：全部用桩 fetchImpl，不打真实网络。
- * 覆盖搜索映射、抓取 retryable 标记、单条扇出、缺 Key 抛码、回退链。
+ * 覆盖搜索映射、抓取 retryable 标记、单条扇出、缺键抛码、回退链、余额端点鉴权。
  */
 
 import { describe, it } from 'node:test';
@@ -11,6 +11,7 @@ import { tinyfishFetch } from '../lib/providers/fetch-tinyfish.js';
 import { linkupFetch } from '../lib/providers/fetch-linkup.js';
 import { getLinkupBalance } from '../lib/credits.js';
 import { dispatchTool } from '../lib/tools.js';
+import { handleCredits } from '../lib/endpoints/credits.js';
 
 /** Linkup 搜索地址片段（桩路由用）。 */
 const SEARCH_MARK = '/v1/search';
@@ -20,6 +21,8 @@ const TINYFISH_FETCH_URL = 'https://api.fetch.tinyfish.ai';
 const GOOD_URL = 'https://case.local/good';
 /** 回退失败的目标地址。 */
 const BAD_URL = 'https://case.local/bad';
+/** 余额端点冒烟用的代理密钥（只活在单测进程）。 */
+const PROXY_KEY = 'test-proxy-key';
 
 /**
  * 构造桩 Response（只实现调用方用到的 ok/status/json）。
@@ -154,5 +157,42 @@ describe('dispatchTool 回退链', () => {
     assert.equal(out.results.length, 1);
     assert.equal(out.results[0].url, GOOD_URL);
     assert.equal(out.errors.length, 0);
+  });
+});
+
+/** 余额端点鉴权：独立 /credits 端点无代理密钥与错密钥均回 401 未授权。 */
+describe('handleCredits 余额端点鉴权', () => {
+  it('无代理密钥回缺密钥', async () => {
+    /** @type {(url: string) => Promise<any>} 不应被调用的上游桩 */
+    const neverStub = async () => {
+      throw new Error('未授权时不应触碰上游');
+    };
+    const request = new Request('https://case.local/credits');
+    const response = await handleCredits(
+      request,
+      { env: { PROXY_API_KEY: PROXY_KEY }, fetchImpl: neverStub },
+    );
+    assert.equal(response.status, 401);
+    const body = await response.json();
+    assert.equal(body.success, false);
+    assert.equal(body.error, 'missing_api_key');
+  });
+
+  it('错代理密钥回无效密钥', async () => {
+    /** @type {(url: string) => Promise<any>} 不应被调用的上游桩 */
+    const neverStub = async () => {
+      throw new Error('未授权时不应触碰上游');
+    };
+    const request = new Request('https://case.local/credits', {
+      headers: { 'x-api-key': 'wrong-key' },
+    });
+    const response = await handleCredits(
+      request,
+      { env: { PROXY_API_KEY: PROXY_KEY }, fetchImpl: neverStub },
+    );
+    assert.equal(response.status, 401);
+    const body = await response.json();
+    assert.equal(body.success, false);
+    assert.equal(body.error, 'invalid_api_key');
   });
 });

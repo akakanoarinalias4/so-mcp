@@ -1,7 +1,8 @@
 /**
  * scripts/smoke.js
  * 本地冒烟：零依赖、不联网，全部用桩 fetchImpl 代替上游。
- * 覆盖 initialize / tools.list / tools.call so_search / handleCredits 双 OK 与缺 Key skipped。
+ * 覆盖 initialize 回服务名 / tools.list 回三工具名 / so_search 映射正确 /
+ * so_fetch 回退链正确 / handleCredits 双 OK 与缺 Key 双 skipped。
  * 任一步失败即非零退出；全部通过打印中文通过行。
  */
 
@@ -16,6 +17,9 @@ const STUB_SEARCH_RESULTS = [
   { name: '冒烟标题一', url: 'https://smoke.local/a', content: '冒烟正文一' },
   { title: '冒烟标题二', link: 'https://smoke.local/b', snippet: '冒烟正文二' },
 ];
+
+/** 回退链冒烟的目标地址（主供应商可重试失败，回退成功）。 */
+const FALLBACK_URL = 'https://smoke.local/fallback';
 
 /**
  * 构造桩 Response（只实现调用方用到的 ok/status/json）。
@@ -49,6 +53,15 @@ async function stubFetch(url, init = {}) {
     return stubResponse({ url: body.url, title: '冒烟抓取', markdown: '冒烟抓取正文' });
   }
   if (text.includes('tinyfish')) {
+    const body = JSON.parse(init.body || '{}');
+    const urls = Array.isArray(body.urls) ? body.urls : [];
+    // 回退链冒烟：回退目标地址报可重试的超时，其余地址直接成功（空错误）。
+    if (urls.includes(FALLBACK_URL)) {
+      return stubResponse({
+        results: [],
+        errors: [{ url: FALLBACK_URL, error: 'timeout' }],
+      });
+    }
     return stubResponse({ results: [], errors: [] });
   }
   throw new Error('桩 fetch 收到未知地址：' + text);
@@ -74,16 +87,18 @@ async function main() {
   check(initRes?.result?.serverInfo?.name === 'so-mcp', 'initialize 未返回 so-mcp 服务信息');
   console.log('通过：initialize 返回服务名 so-mcp');
 
-  // 2. tools/list：四个工具齐全。
+  // 2. tools/list：恰为搜、抓、验证三工具，且无余额工具。
   const listRes = await handleMcpRequest(
     { jsonrpc: '2.0', id: 2, method: 'tools/list' },
     { fetchImpl: stubFetch },
   );
   const toolNames = (listRes?.result?.tools || []).map((/** @type {any} */ tool) => tool.name);
-  for (const name of ['so_search', 'so_fetch', 'so_credits', 'so_verify']) {
+  check(toolNames.length === 3, 'tools/list 应恰为三工具，实际：' + toolNames.join(','));
+  for (const name of ['so_search', 'so_fetch', 'so_verify']) {
     check(toolNames.includes(name), 'tools/list 缺少工具：' + name);
   }
-  console.log('通过：tools/list 返回 so_search/so_fetch/so_credits/so_verify');
+  check(!toolNames.includes('so_credits'), 'tools/list 不应再暴露 so_credits');
+  console.log('通过：tools/list 返回 so_search/so_fetch/so_verify 三工具');
 
   // 3. tools/call so_search：桩结果正确映射 title/url/content。
   const callRes = await handleMcpRequest(
@@ -102,7 +117,35 @@ async function main() {
   check(payload.results?.[1]?.content === '冒烟正文二', 'so_search 次条正文映射错误');
   console.log('通过：tools/call so_search 映射 title/url/content 正确');
 
-  // 4. handleCredits 双 OK：两家余额并行查到。
+  // 4. tools/call so_fetch：主供应商可重试失败后回退成功，置 fallbackUsed。
+  const fetchRes = await handleMcpRequest(
+    {
+      jsonrpc: '2.0',
+      id: 4,
+      method: 'tools/call',
+      params: { name: 'so_fetch', arguments: { urls: [FALLBACK_URL] } },
+    },
+    {
+      fetchPrimary: 'tinyfish',
+      fetchFallback: 'linkup',
+      tinyfishApiKey: 'smoke-tinyfish-key',
+      linkupApiKey: 'smoke-linkup-key',
+      fetchImpl: stubFetch,
+    },
+  );
+  const fetchPayload = JSON.parse(fetchRes?.result?.content?.[0]?.text || '{}');
+  check(fetchPayload.fallbackUsed === true, 'so_fetch 回退链未置 fallbackUsed');
+  check(
+    Array.isArray(fetchPayload.providers) &&
+      fetchPayload.providers[0] === 'tinyfish' &&
+      fetchPayload.providers[1] === 'linkup',
+    'so_fetch 回退链 providers 应为 tinyfish,linkup',
+  );
+  check(fetchPayload.results?.[0]?.url === FALLBACK_URL, 'so_fetch 回退结果地址错误');
+  check((fetchPayload.errors || []).length === 0, 'so_fetch 回退后 errors 应为空');
+  console.log('通过：tools/call so_fetch 回退链正确');
+
+  // 5. handleCredits 双 OK：两家余额并行查到。
   const okRequest = new Request('https://smoke.local/credits', {
     headers: { 'x-api-key': PROXY_KEY },
   });
@@ -127,7 +170,7 @@ async function main() {
   check(okBody?.data?.tinyfish?.provider === 'tinyfish', 'handleCredits tinyfish 钱包缺失');
   console.log('通过：handleCredits 双 Key 下两家余额均 OK');
 
-  // 5. handleCredits 缺 Key：两家记 skipped 而不是报错。
+  // 6. handleCredits 缺 Key：两家记 skipped 而不是报错。
   const skipRequest = new Request('https://smoke.local/credits', {
     headers: { 'x-api-key': PROXY_KEY },
   });
