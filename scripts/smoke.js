@@ -4,7 +4,7 @@
  * 覆盖 initialize 回服务名 / tools.list 回三工具名 / so_search 映射正确 /
  * so_fetch 回退链正确 / 搜索扇出去重正确 / 验证引用装配正确 /
  * handleCredits 动态键双家 OK 且无汇总字段 /
- * 空名单回代理未配置 / 单家只回单键。
+ * 空名单回代理未配置 / 单家只回单键 / 八家扇出八键齐全。
  * 任一步失败即非零退出；全部通过打印中文通过行。
  */
 
@@ -62,6 +62,47 @@ async function stubFetch(url, init = {}) {
     return stubResponse({
       results: urls.map((target) => ({ url: target, title: '冒烟抓取', raw_content: '冒烟抓取正文' })),
       failed_results: [],
+    });
+  }
+  if (text.includes('api.tavily.com/usage')) {
+    return stubResponse({
+      key: { usage: 150, limit: 1000 },
+      account: { current_plan: 'Bootstrap', plan_usage: 500, plan_limit: 15000 },
+    });
+  }
+  if (text.includes('api.hasdata.com/user/me/usage')) {
+    return stubResponse({
+      status: 'ok',
+      data: { totalCredits: 10000000, availableCredits: 5473702, concurrentRequests: 0, availableConcurrency: 100 },
+    });
+  }
+  if (text.includes('api.firecrawl.dev/v2/team/credit-usage')) {
+    return stubResponse({
+      success: true,
+      data: {
+        remainingCredits: 1000,
+        planCredits: 500000,
+        billingPeriodStart: '2025-01-01T00:00:00Z',
+        billingPeriodEnd: '2025-01-31T23:59:59Z',
+      },
+    });
+  }
+  if (text.includes('api.scrape.do/info')) {
+    return stubResponse({
+      IsActive: true,
+      ConcurrentRequest: 40,
+      MaxMonthlyRequest: 3500000,
+      RemainingConcurrentRequest: 15,
+      RemainingMonthlyRequest: 2565023,
+    });
+  }
+  if (text.includes('api.scraperapi.com/account')) {
+    return stubResponse({
+      requestLimit: '1000',
+      requestCount: 588,
+      concurrentRequests: 0,
+      concurrencyLimit: 5,
+      failedRequestCount: 258,
     });
   }
   if (text.includes('tinyfish')) {
@@ -216,15 +257,15 @@ async function main() {
   check(okBody?.data?.tinyfish?.provider === 'tinyfish', 'handleCredits tinyfish 钱包缺失');
   check(
     okBody?.data?.tavily?.provider === 'tavily' &&
-      okBody.data.tavily.balance === null,
+      typeof okBody.data.tavily.remaining === 'number' &&
+      typeof okBody.data.tavily.limit === 'number',
     'handleCredits tavily 余额缺失',
   );
-  check(Object.keys(okBody?.data ?? {}).length === 2, 'handleCredits 双家 data 应恰含两键');
   check(!('total' in (okBody?.data ?? {})), 'handleCredits 不应回汇总 total 字段');
   check(!('balance' in (okBody?.data ?? {})), 'handleCredits 不应回汇总 balance 字段');
   console.log('通过：handleCredits 双家动态键均 OK 且无汇总字段');
 
-  // 6. handleCredits 空名单：两上游密钥均缺配才回 500 代理未配置。
+  // 6. handleCredits 空名单：八上游密钥均缺配才回 500 代理未配置。
   const emptyRequest = new Request('https://smoke.local/credits', {
     headers: { Authorization: 'Bearer ' + PROXY_KEY },
   });
@@ -253,6 +294,36 @@ async function main() {
   check(singleBody?.data?.tinyfish?.provider === 'tinyfish', 'handleCredits 单家 tinyfish 键缺失');
   check(!('tavily' in (singleBody?.data ?? {})), 'handleCredits 单家时不应补 tavily 空键');
   console.log('通过：handleCredits 单家只回 tinyfish 单键');
+  // 8. handleCredits 八家扇出：八 Key 全配时 data 恰含八键，exa/querit 为 null 占位。
+  const fullRequest = new Request('https://smoke.local/credits', {
+    headers: { Authorization: 'Bearer ' + PROXY_KEY },
+  });
+  const fullResponse = await handleCredits(
+    fullRequest,
+    {
+      env: {
+        PROXY_API_KEY: PROXY_KEY,
+        TINYFISH_API_KEY: 'smoke-tinyfish-key',
+        TAVILY_API_KEY: 'smoke-tavily-key',
+        EXA_API_KEY: 'smoke-exa-key',
+        QUERIT_API_KEY: 'smoke-querit-key',
+        HASDATA_API_KEY: 'smoke-hasdata-key',
+        FIRECRAWL_API_KEY: 'smoke-firecrawl-key',
+        SCRAPEDO_API_KEY: 'smoke-scrapedo-key',
+        SCRAPERAPI_API_KEY: 'smoke-scraperapi-key',
+      },
+      fetchImpl: stubFetch,
+    },
+  );
+  const fullBody = await fullResponse.json();
+  check(fullResponse.status === 200, 'handleCredits 八家扇出时未回 200');
+  check(Object.keys(fullBody?.data ?? {}).length === 8, 'handleCredits 八家扇出时 data 应恰含八键');
+  for (const name of ['tinyfish', 'tavily', 'exa', 'querit', 'hasdata', 'firecrawl', 'scrapedo', 'scraperapi']) {
+    check(fullBody?.data?.[name]?.provider === name, 'handleCredits 八家扇出缺失：' + name);
+  }
+  check(fullBody?.data?.exa?.balance === null, 'handleCredits exa 应为 null 占位');
+  check(fullBody?.data?.querit?.balance === null, 'handleCredits querit 应为 null 占位');
+  console.log('通过：handleCredits 八家扇出八键齐全且 exa/querit 为 null 占位');
   console.log('冒烟全部通过');
 }
 main().catch((error) => {

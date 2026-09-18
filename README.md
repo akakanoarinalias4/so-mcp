@@ -93,6 +93,21 @@ curl -s 'https://<应用>.vercel.app/credits' -H "Authorization: Bearer $PROXY_A
 名单为空（八家上游密钥均缺配）才整体停机回 500 代理未配置，单键可运行。
 该端点同样走统一准入鉴权：无代理密钥回 `missing_api_key`，错密钥回 `invalid_api_key`。
 
+八家余额口径（仅人工查看，不参与工作流）：
+
+| 供应商 | 口径 | 单位 | 人工查看方式 |
+| --- | --- | --- | --- |
+| Tinyfish | 钱包剩余，无总额 | USD | [钱包接口文档](https://docs.tinyfish.ai/api-reference/wallet/get-wallet) |
+| Tavily | 总额 / 已用 / 剩余 | credits | [用量接口文档](https://docs.tavily.com/documentation/api-reference/endpoint/usage) |
+| HasData | 总额 / 剩余 | 点 | [点数与并发文档](https://docs.hasdata.com/credits-and-concurrency) |
+| Firecrawl | 剩余 / 总额 | 点 | [剩余额度接口文档](https://docs.firecrawl.dev/api-reference/endpoint/credit-usage) |
+| Scrape.do | 总额 / 剩余（主 info 备 me） | 点 | [用量统计文档](https://scrape.do/documentation/api-response/usage-stats) |
+| ScraperAPI | 请求数口径（加权低估） | 请求数 | [点数用量文档](https://docs.scraperapi.com/account-management/credit-usage) |
+| Exa | 无公开余额接口，仅 Dashboard 人工查看 | — | [Billing 页](https://dashboard.exa.ai/billing) |
+| Querit | 无公开余额接口，仅 Dashboard 人工查看 | — | [Dashboard 总览](https://www.querit.ai/en/dashboard/home) |
+
+余额仅供人工确认剩余额度，不参与模型工作流；上游密钥只放服务端环境变量，永不回传客户端。
+
 | 变量 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `PROXY_API_KEY` | 是 | — | 客户端出示给本代理的凭证（唯一需要配给客户端的密钥）。 |

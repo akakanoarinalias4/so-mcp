@@ -2,7 +2,7 @@
  * tests/providers.test.js
  * 供应商层单测：全部用桩 fetchImpl，不打真实网络。
  * 覆盖搜索映射、抓取 retryable 标记、批量结算、缺键抛码、回退链、分级上限、搜索扇出、
- * 余额端点鉴权、动态钱包单空二态。
+ * 余额端点鉴权、八家余额（六家实调两家占位）、动态钱包双家与空名单。
  */
 
 import { describe, it } from 'node:test';
@@ -10,7 +10,16 @@ import assert from 'node:assert/strict';
 import { tavilySearch } from '../lib/providers/search-tavily.js';
 import { tinyfishFetch } from '../lib/providers/fetch-tinyfish.js';
 import { tavilyFetch } from '../lib/providers/fetch-tavily.js';
-import { getTinyfishWallet } from '../lib/credits.js';
+import {
+  getTinyfishWallet,
+  getTavilyBalance,
+  getHasdataBalance,
+  getFirecrawlBalance,
+  getScrapedoBalance,
+  getScraperapiBalance,
+  getExaBalance,
+  getQueritBalance,
+} from '../lib/credits.js';
 import { dispatchTool } from '../lib/tools.js';
 import { handleCredits } from '../lib/endpoints/credits.js';
 
@@ -148,12 +157,28 @@ describe('getTinyfishWallet 默认钱包宿主', () => {
     /** @type {(url: string) => Promise<any>} 记录地址的桩 */
     const recordStub = async (url) => {
       seen.push(String(url));
-      return stubResponse({ wallet: { credits: 1 } });
+      return stubResponse({ available_balance: '21.44', currency: 'USD', as_of: '2026-08-10T18:04:11.220Z' });
     };
     const out = await getTinyfishWallet({ tinyfishApiKey: 'test-key', fetchImpl: recordStub });
     assert.equal(out.provider, 'tinyfish');
     assert.equal(seen.length, 1);
     assert.equal(seen[0], TINYFISH_WALLET_URL);
+    assert.equal(out.remaining, 21.44);
+    assert.equal(out.balance, 21.44);
+    assert.equal(out.currency, 'USD');
+    assert.equal(out.limit, null);
+    assert.equal(out.usage, null);
+    assert.deepEqual(out.raw, { available_balance: '21.44', currency: 'USD', as_of: '2026-08-10T18:04:11.220Z' });
+  });
+
+  it('404 转 legacy 占位不抛错', async () => {
+    /** @type {(url: string) => Promise<any>} 固定 404 的桩 */
+    const legacyStub = async () => stubResponse({ error: { code: 'FEATURE_NOT_AVAILABLE' } }, 404);
+    const out = await getTinyfishWallet({ tinyfishApiKey: 'test-key', fetchImpl: legacyStub });
+    assert.equal(out.provider, 'tinyfish');
+    assert.equal(out.balance, null);
+    assert.equal(out.remaining, null);
+    assert.match(String(out.note), /legacy/);
   });
 
   it('鉴权四态：401/403 抛 CREDENTIAL_MISSING，其余非 2xx 抛 UPSTREAM_ERROR', async () => {
@@ -179,6 +204,187 @@ describe('getTinyfishWallet 默认钱包宿主', () => {
       getTinyfishWallet({ tinyfishApiKey: 'test-key', fetchImpl: timeoutStub }),
       (/** @type {any} */ error) => (/** @type {any} */ (error)).code === 'UPSTREAM_TIMEOUT',
     );
+  });
+});
+
+/** Tavily 实调：单接口 GET /usage，总额取计划级，剩余=总额-已用。 */
+describe('getTavilyBalance 实调', () => {
+  it('成功归一 limit/usage/remaining', async () => {
+    /** @type {(url: string, init?: any) => Promise<any>} 按地址路由的桩 */
+    const usageStub = async (url, init = {}) => {
+      assert.match(String(url), /api\.tavily\.com\/usage/);
+      assert.match(String(init?.headers?.Authorization ?? ''), /^Bearer /);
+      return stubResponse({
+        key: { usage: 150, limit: 1000 },
+        account: { plan_usage: 500, plan_limit: 15000, current_plan: 'Bootstrap' },
+      });
+    };
+    const out = await getTavilyBalance({ tavilyApiKey: 'test-key', fetchImpl: usageStub });
+    assert.equal(out.provider, 'tavily');
+    assert.equal(out.limit, 15000);
+    assert.equal(out.usage, 500);
+    assert.equal(out.remaining, 14500);
+    assert.equal(out.balance, 14500);
+    assert.equal(out.unit, 'credits');
+  });
+
+  it('缺 Key 抛 CREDENTIAL_MISSING', async () => {
+    /** @type {(url: string) => Promise<any>} 不应被调用的桩 */
+    const neverStub = async () => {
+      throw new Error('缺 Key 时不应发起请求');
+    };
+    await assert.rejects(
+      getTavilyBalance({ fetchImpl: neverStub }),
+      (/** @type {any} */ error) => (/** @type {any} */ (error)).code === 'CREDENTIAL_MISSING',
+    );
+  });
+
+  it('401 转 CREDENTIAL_MISSING', async () => {
+    /** @type {(url: string) => Promise<any>} 固定鉴权失败的桩 */
+    const authStub = async () => stubResponse({ message: 'unauthorized' }, 401);
+    await assert.rejects(
+      getTavilyBalance({ tavilyApiKey: 'test-key', fetchImpl: authStub }),
+      (/** @type {any} */ error) => (/** @type {any} */ (error)).code === 'CREDENTIAL_MISSING',
+    );
+  });
+});
+
+/** HasData 实调：单接口 GET /user/me/usage，已用本地推导。 */
+describe('getHasdataBalance 实调', () => {
+  it('成功归一 remaining/limit/usage', async () => {
+    /** @type {(url: string) => Promise<any>} 按地址路由的桩 */
+    const usageStub = async (url) => {
+      assert.match(String(url), /api\.hasdata\.com\/user\/me\/usage/);
+      return stubResponse({
+        status: 'ok',
+        data: { totalCredits: 10000000, availableCredits: 5473702, concurrentRequests: 0, availableConcurrency: 100 },
+      });
+    };
+    const out = await getHasdataBalance({ hasdataApiKey: 'test-key', fetchImpl: usageStub });
+    assert.equal(out.provider, 'hasdata');
+    assert.equal(out.remaining, 5473702);
+    assert.equal(out.balance, 5473702);
+    assert.equal(out.limit, 10000000);
+    assert.equal(out.usage, 10000000 - 5473702);
+  });
+});
+
+/** Firecrawl 实调：单接口 GET /v2/team/credit-usage，camel 与 snake 双兼容。 */
+describe('getFirecrawlBalance 实调', () => {
+  it('成功归一 remaining/limit', async () => {
+    /** @type {(url: string) => Promise<any>} 按地址路由的桩 */
+    const creditStub = async (url) => {
+      assert.match(String(url), /api\.firecrawl\.dev\/v2\/team\/credit-usage/);
+      return stubResponse({ success: true, data: { remainingCredits: 1000, planCredits: 500000 } });
+    };
+    const out = await getFirecrawlBalance({ firecrawlApiKey: 'test-key', fetchImpl: creditStub });
+    assert.equal(out.provider, 'firecrawl');
+    assert.equal(out.remaining, 1000);
+    assert.equal(out.balance, 1000);
+    assert.equal(out.limit, 500000);
+  });
+
+  it('snake_case 回退', async () => {
+    /** @type {(url: string) => Promise<any>} 蛇形字段的桩 */
+    const snakeStub = async () => stubResponse({ success: true, data: { remaining_credits: 42, plan_credits: 1000 } });
+    const out = await getFirecrawlBalance({ firecrawlApiKey: 'test-key', fetchImpl: snakeStub });
+    assert.equal(out.remaining, 42);
+    assert.equal(out.limit, 1000);
+  });
+});
+
+/** Scrape.do 实调：主 info 接口，429/5xx 降级 /me。 */
+describe('getScrapedoBalance 实调', () => {
+  it('主接口成功归一 remaining/limit/usage', async () => {
+    /** @type {(url: string) => Promise<any>} 按地址路由的桩 */
+    const infoStub = async (url) => {
+      assert.match(String(url), /api\.scrape\.do\/info/);
+      return stubResponse({ IsActive: true, MaxMonthlyRequest: 3500000, RemainingMonthlyRequest: 2565023 });
+    };
+    const out = await getScrapedoBalance({ scrapedoApiKey: 'test-key', fetchImpl: infoStub });
+    assert.equal(out.provider, 'scrapedo');
+    assert.equal(out.remaining, 2565023);
+    assert.equal(out.balance, 2565023);
+    assert.equal(out.limit, 3500000);
+    assert.equal(out.usage, 3500000 - 2565023);
+  });
+
+  it('/me 降级回剩余点数', async () => {
+    /** @type {(url: string) => Promise<any>} 主限流备成功的桩 */
+    const fallbackStub = async (url) => {
+      const text = String(url);
+      if (text.includes('api.scrape.do/info')) return stubResponse({ message: 'throttled' }, 429);
+      assert.match(text, /q\.scrape\.do\/api\/v1\/me/);
+      return stubResponse({ AvaliableCredits: 42 });
+    };
+    const out = await getScrapedoBalance({ scrapedoApiKey: 'test-key', fetchImpl: fallbackStub });
+    assert.equal(out.provider, 'scrapedo');
+    assert.equal(out.remaining, 42);
+    assert.equal(out.balance, 42);
+  });
+});
+
+/** ScraperAPI 实调：单接口 GET /account，requestLimit 可能为字符串。 */
+describe('getScraperapiBalance 实调', () => {
+  it('成功归一 remaining=412', async () => {
+    /** @type {(url: string) => Promise<any>} 按地址路由的桩 */
+    const accountStub = async (url) => {
+      assert.match(String(url), /api\.scraperapi\.com\/account/);
+      return stubResponse({ requestLimit: '1000', requestCount: 588, concurrentRequests: 0, concurrencyLimit: 5 });
+    };
+    const out = await getScraperapiBalance({ scraperapiApiKey: 'test-key', fetchImpl: accountStub });
+    assert.equal(out.provider, 'scraperapi');
+    assert.equal(out.limit, 1000);
+    assert.equal(out.usage, 588);
+    assert.equal(out.remaining, 412);
+    assert.equal(out.balance, 412);
+  });
+
+  it('缺 Key 抛 CREDENTIAL_MISSING', async () => {
+    /** @type {(url: string) => Promise<any>} 不应被调用的桩 */
+    const neverStub = async () => {
+      throw new Error('缺 Key 时不应发起请求');
+    };
+    await assert.rejects(
+      getScraperapiBalance({ fetchImpl: neverStub }),
+      (/** @type {any} */ error) => (/** @type {any} */ (error)).code === 'CREDENTIAL_MISSING',
+    );
+  });
+
+  it('401 转 CREDENTIAL_MISSING', async () => {
+    /** @type {(url: string) => Promise<any>} 固定鉴权失败的桩 */
+    const authStub = async () => stubResponse({ message: 'unauthorized' }, 401);
+    await assert.rejects(
+      getScraperapiBalance({ scraperapiApiKey: 'test-key', fetchImpl: authStub }),
+      (/** @type {any} */ error) => (/** @type {any} */ (error)).code === 'CREDENTIAL_MISSING',
+    );
+  });
+});
+
+/** Exa/Querit 占位：无公开余额接口，不触网。 */
+describe('getExaBalance/getQueritBalance 占位', () => {
+  it('Exa 回 null 余额且 note 含 dashboard 提示', async () => {
+    /** @type {(url: string) => Promise<any>} 不应被调用的桩 */
+    const neverStub = async () => {
+      throw new Error('占位不应触碰网络');
+    };
+    const out = await getExaBalance({ exaApiKey: 'test-key', fetchImpl: neverStub });
+    assert.equal(out.provider, 'exa');
+    assert.equal(out.balance, null);
+    assert.equal(out.remaining, null);
+    assert.match(String(out.note), /dashboard/i);
+  });
+
+  it('Querit 回 null 余额且 note 含文档提示', async () => {
+    /** @type {(url: string) => Promise<any>} 不应被调用的桩 */
+    const neverStub = async () => {
+      throw new Error('占位不应触碰网络');
+    };
+    const out = await getQueritBalance({ queritApiKey: 'test-key', fetchImpl: neverStub });
+    assert.equal(out.provider, 'querit');
+    assert.equal(out.balance, null);
+    assert.equal(out.remaining, null);
+    assert.match(String(out.note), /Dashboard/);
   });
 });
 
@@ -351,7 +557,7 @@ describe('handleCredits 动态钱包', () => {
     /** @type {(url: string) => Promise<any>} 只服务 Tinyfish 钱包地址的桩 */
     const tinyfishOnlyStub = async (url) => {
       assert.match(String(url), /agent\.tinyfish\.ai\/v1\/wallet/);
-      return stubResponse({ wallet: { credits: 5678 } });
+      return stubResponse({ available_balance: '21.44', currency: 'USD' });
     };
     const request = new Request('https://case.local/credits', {
       headers: { authorization: 'Bearer ' + PROXY_KEY },
@@ -365,6 +571,36 @@ describe('handleCredits 动态钱包', () => {
     assert.equal(body.success, true);
     assert.equal(body?.data?.tinyfish?.provider, 'tinyfish');
     assert.equal('tavily' in (body?.data ?? {}), false);
+  });
+
+  it('双家动态键按新形状回剩余额度', async () => {
+    /** @type {(url: string) => Promise<any>} 按地址路由的桩 */
+    const dualStub = async (url) => {
+      const text = String(url);
+      if (text.includes('agent.tinyfish.ai/v1/wallet')) {
+        return stubResponse({ available_balance: '21.44', currency: 'USD' });
+      }
+      assert.match(text, /api\.tavily\.com\/usage/);
+      return stubResponse({
+        key: { usage: 150, limit: 1000 },
+        account: { plan_usage: 500, plan_limit: 15000, current_plan: 'Bootstrap' },
+      });
+    };
+    const request = new Request('https://case.local/credits', {
+      headers: { authorization: 'Bearer ' + PROXY_KEY },
+    });
+    const response = await handleCredits(
+      request,
+      { env: { PROXY_API_KEY: PROXY_KEY, TINYFISH_API_KEY: 'test-tinyfish-key', TAVILY_API_KEY: 'test-tavily-key' }, fetchImpl: dualStub },
+    );
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.success, true);
+    assert.equal(body?.data?.tinyfish?.provider, 'tinyfish');
+    assert.equal(body?.data?.tinyfish?.remaining, 21.44);
+    assert.equal(body?.data?.tavily?.provider, 'tavily');
+    assert.equal(body?.data?.tavily?.remaining, 14500);
+    assert.equal(body?.data?.tavily?.limit, 15000);
   });
 
 

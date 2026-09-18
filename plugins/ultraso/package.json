@@ -1,0 +1,15 @@
+{
+  "name": "ultraso",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "ultraso 插件：ultra 档多供应商并行搜索抓取验证（高档标准模式）",
+  "keywords": ["pi-package"],
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  }
+}
